@@ -3,11 +3,13 @@
 //! The core deliberately has no dependency on Scarlet or on a windowing
 //! system. It decodes common raster image formats with `image` and rasterizes
 //! PDF pages with `hayro`, so the same document model can be used by the
-//! Scarlet frontend, the host frontend, and headless tests.
+//! ScarletUI frontends and headless tests.
 
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use hayro::hayro_interpret::{InterpreterSettings, hayro_syntax::Pdf};
 use hayro::vello_cpu::color::palette::css::WHITE;
@@ -114,11 +116,22 @@ impl Display for DocumentError {
 
 impl std::error::Error for DocumentError {}
 
+type PrefetchCallback = Box<dyn FnOnce(Result<(), DocumentError>) + Send + 'static>;
+
+struct RenderRequest {
+    index: usize,
+    callback: PrefetchCallback,
+}
+
 enum DocumentSource {
     Image(Arc<Bitmap>),
     Pdf {
         pdf: Arc<Pdf>,
         cache: Mutex<Vec<Option<Arc<Bitmap>>>>,
+        errors: Mutex<Vec<Option<DocumentError>>>,
+        pending: Mutex<Vec<bool>>,
+        queue: Mutex<Vec<RenderRequest>>,
+        worker_running: AtomicBool,
     },
 }
 
@@ -156,6 +169,10 @@ impl Document {
                 source: DocumentSource::Pdf {
                     pdf: Arc::new(pdf),
                     cache: Mutex::new(vec![None; page_count]),
+                    errors: Mutex::new(vec![None; page_count]),
+                    pending: Mutex::new(vec![false; page_count]),
+                    queue: Mutex::new(Vec::new()),
+                    worker_running: AtomicBool::new(false),
                 },
             }));
         }
@@ -192,15 +209,157 @@ impl Document {
         self.page_count
     }
 
+    /// Return a page only when it has already been rendered.
+    ///
+    /// Unlike [`Document::page`], this method never starts a synchronous PDF
+    /// render. It is intended for UI code that must remain responsive while a
+    /// background render is in progress.
+    pub fn cached_page(&self, index: usize) -> Result<Option<Arc<Bitmap>>, DocumentError> {
+        if index >= self.page_count {
+            return Err(DocumentError::new("page index is out of range"));
+        }
+
+        match &self.source {
+            DocumentSource::Image(bitmap) => Ok(Some(bitmap.clone())),
+            DocumentSource::Pdf { cache, errors, .. } => {
+                let errors = errors
+                    .lock()
+                    .map_err(|_| DocumentError::new("PDF render errors are poisoned"))?;
+                if let Some(Some(error)) = errors.get(index) {
+                    return Err(error.clone());
+                }
+
+                let cache = cache
+                    .lock()
+                    .map_err(|_| DocumentError::new("PDF page cache is poisoned"))?;
+                Ok(cache.get(index).and_then(Option::clone))
+            }
+        }
+    }
+
+    /// Request a page to be rendered in the document's background worker.
+    ///
+    /// Repeated requests for a cached or in-flight page are ignored. The
+    /// callback is called once after a newly queued request finishes.
+    pub fn prefetch<F>(self: &Arc<Self>, index: usize, callback: F)
+    where
+        F: FnOnce(Result<(), DocumentError>) + Send + 'static,
+    {
+        if index >= self.page_count {
+            callback(Err(DocumentError::new("page index is out of range")));
+            return;
+        }
+
+        let should_start_worker = match &self.source {
+            DocumentSource::Image(_) => return,
+            DocumentSource::Pdf {
+                cache,
+                errors,
+                pending,
+                queue,
+                worker_running,
+                ..
+            } => {
+                let mut pending = match pending.lock() {
+                    Ok(pending) => pending,
+                    Err(_) => {
+                        callback(Err(DocumentError::new("PDF render state is poisoned")));
+                        return;
+                    }
+                };
+
+                if pending.get(index).copied().unwrap_or(false) {
+                    return;
+                }
+
+                let cache = match cache.lock() {
+                    Ok(cache) => cache,
+                    Err(_) => {
+                        callback(Err(DocumentError::new("PDF page cache is poisoned")));
+                        return;
+                    }
+                };
+
+                if cache.get(index).and_then(Option::as_ref).is_some() {
+                    return;
+                }
+
+                let errors = match errors.lock() {
+                    Ok(errors) => errors,
+                    Err(_) => {
+                        callback(Err(DocumentError::new("PDF render errors are poisoned")));
+                        return;
+                    }
+                };
+                if let Some(Some(error)) = errors.get(index) {
+                    callback(Err(error.clone()));
+                    return;
+                }
+
+                let Some(slot) = pending.get_mut(index) else {
+                    callback(Err(DocumentError::new("page index is out of range")));
+                    return;
+                };
+                *slot = true;
+                drop(errors);
+                drop(cache);
+                drop(pending);
+
+                let mut queue = match queue.lock() {
+                    Ok(queue) => queue,
+                    Err(_) => {
+                        let result = Err(DocumentError::new("PDF render queue is poisoned"));
+                        self.finish_prefetch(index, &result);
+                        callback(result);
+                        return;
+                    }
+                };
+                queue.push(RenderRequest {
+                    index,
+                    callback: Box::new(callback),
+                });
+                drop(queue);
+
+                worker_running
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            }
+        };
+
+        if should_start_worker {
+            let document = Arc::clone(self);
+            thread::spawn(move || document.render_queue_worker());
+        }
+    }
+
     /// Return a rasterized page, rendering and caching PDF pages on demand.
     pub fn page(&self, index: usize) -> Result<Arc<Bitmap>, DocumentError> {
         if index >= self.page_count {
             return Err(DocumentError::new("page index is out of range"));
         }
 
+        self.render_page_now(index)
+    }
+
+    fn render_page_now(&self, index: usize) -> Result<Arc<Bitmap>, DocumentError> {
+        if index >= self.page_count {
+            return Err(DocumentError::new("page index is out of range"));
+        }
+
         match &self.source {
             DocumentSource::Image(bitmap) => Ok(bitmap.clone()),
-            DocumentSource::Pdf { pdf, cache } => {
+            DocumentSource::Pdf {
+                pdf, cache, errors, ..
+            } => {
+                {
+                    let errors = errors
+                        .lock()
+                        .map_err(|_| DocumentError::new("PDF render errors are poisoned"))?;
+                    if let Some(Some(error)) = errors.get(index) {
+                        return Err(error.clone());
+                    }
+                }
+
                 {
                     let cache = cache
                         .lock()
@@ -217,8 +376,77 @@ impl Document {
                 if let Some(slot) = cache.get_mut(index) {
                     *slot = Some(bitmap.clone());
                 }
+                if let Ok(mut errors) = errors.lock()
+                    && let Some(slot) = errors.get_mut(index)
+                {
+                    *slot = None;
+                }
                 Ok(bitmap)
             }
+        }
+    }
+
+    fn finish_prefetch(&self, index: usize, result: &Result<(), DocumentError>) {
+        let DocumentSource::Pdf {
+            errors, pending, ..
+        } = &self.source
+        else {
+            return;
+        };
+
+        if let Ok(mut pending) = pending.lock()
+            && let Some(slot) = pending.get_mut(index)
+        {
+            *slot = false;
+        }
+        if let Err(error) = result
+            && let Ok(mut errors) = errors.lock()
+            && let Some(slot) = errors.get_mut(index)
+        {
+            *slot = Some(error.clone());
+        }
+    }
+
+    fn render_queue_worker(self: Arc<Self>) {
+        loop {
+            let request = match &self.source {
+                DocumentSource::Pdf { queue, .. } => {
+                    queue.lock().ok().and_then(|mut queue| queue.pop())
+                }
+                DocumentSource::Image(_) => None,
+            };
+
+            let Some(request) = request else {
+                let DocumentSource::Pdf {
+                    queue,
+                    worker_running,
+                    ..
+                } = &self.source
+                else {
+                    return;
+                };
+
+                if worker_running
+                    .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    continue;
+                }
+
+                let has_queued_work = queue.lock().map(|queue| !queue.is_empty()).unwrap_or(false);
+                if has_queued_work
+                    && worker_running
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    continue;
+                }
+                return;
+            };
+
+            let result = self.render_page_now(request.index).map(|_| ());
+            self.finish_prefetch(request.index, &result);
+            (request.callback)(result);
         }
     }
 }

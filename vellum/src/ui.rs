@@ -30,6 +30,7 @@ pub fn run(
 struct VellumApp {
     document: State<Option<Arc<Document>>>,
     current_page: State<usize>,
+    render_revision: State<u64>,
     zoom: State<f32>,
     fit_to_window: State<bool>,
     status: State<String>,
@@ -47,6 +48,7 @@ impl VellumApp {
         app.zoom.set(1.0);
         app.fit_to_window.set(true);
         app.status.set(status);
+        app.prefetch_neighbors(page);
         app
     }
 
@@ -59,7 +61,52 @@ impl VellumApp {
 
     fn current_bitmap(&self) -> Option<Arc<vellum_core::Bitmap>> {
         let document = self.document.get()?;
-        document.page(self.current_page.get()).ok()
+        let page = self.current_page.get();
+        match document.cached_page(page) {
+            Ok(Some(bitmap)) => Some(bitmap),
+            Ok(None) => {
+                self.request_page(page);
+                None
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn request_page(&self, page: usize) {
+        let Some(document) = self.document.get() else {
+            return;
+        };
+
+        let current_page = self.current_page.clone();
+        let render_revision = self.render_revision.clone();
+        let status = self.status.clone();
+        let title = document.title().to_string();
+        let page_count = document.page_count();
+        document.prefetch(page, move |result| {
+            if current_page.get() != page {
+                return;
+            }
+
+            match result {
+                Ok(()) => {
+                    render_revision.update(|revision| {
+                        *revision = revision.wrapping_add(1);
+                    });
+                    status.set(format!("{} — page {} of {}", title, page + 1, page_count));
+                }
+                Err(error) => status.set(format!("Could not render page: {error}")),
+            }
+        });
+    }
+
+    fn prefetch_neighbors(&self, page: usize) {
+        if page > 0 {
+            self.request_page(page - 1);
+        }
+        if page + 1 < self.page_count() {
+            self.request_page(page + 1);
+        }
+        self.request_page(page);
     }
 
     fn move_page(&self, delta: isize) {
@@ -77,18 +124,14 @@ impl VellumApp {
             return;
         }
 
-        match document.page(target) {
-            Ok(_) => {
-                self.current_page.set(target);
-                self.status.set(format!(
-                    "{} — page {} of {}",
-                    document.title(),
-                    target + 1,
-                    document.page_count()
-                ));
-            }
-            Err(error) => self.status.set(format!("Could not render page: {error}")),
-        }
+        self.current_page.set(target);
+        self.status.set(format!(
+            "{} — rendering page {} of {}",
+            document.title(),
+            target + 1,
+            document.page_count()
+        ));
+        self.prefetch_neighbors(target);
     }
 
     fn set_zoom(&self, zoom: f32) {
