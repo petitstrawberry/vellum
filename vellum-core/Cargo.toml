@@ -1,0 +1,19 @@
+[package]
+name = "vellum-core"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-Rust image and PDF loading and rasterization core for Vellum"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+hayro = { version = "0.7.1", default-features = true }
+image = { version = "0.25", default-features = false, features = [
+    "bmp",
+    "gif",
+    "ico",
+    "jpeg",
+    "png",
+    "qoi",
+    "tga",
+    "webp",
+] }
