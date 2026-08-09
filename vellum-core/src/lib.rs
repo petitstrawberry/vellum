@@ -15,10 +15,9 @@ use hayro::hayro_interpret::{InterpreterSettings, hayro_syntax::Pdf};
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{RenderCache, RenderSettings, render};
 
-// Render at 144 DPI for 72-point PDF coordinates. This keeps text legible
-// after the page is fitted to a window while the bitmap-size guards below
-// prevent pathological documents from allocating unbounded memory.
-const PDF_RENDER_SCALE: f32 = 2.0;
+// Use 144 DPI for synchronous/headless renders. The UI can request a more
+// precise scale based on the physical Canvas dimensions.
+pub const DEFAULT_PDF_RENDER_SCALE_MILLI: u32 = 2_000;
 const PDF_MAX_DIMENSION: f32 = 4096.0;
 const MAX_BITMAP_PIXELS: u64 = 64 * 1024 * 1024;
 
@@ -120,16 +119,23 @@ type PrefetchCallback = Box<dyn FnOnce(Result<(), DocumentError>) + Send + 'stat
 
 struct RenderRequest {
     index: usize,
+    render_scale_milli: u32,
     callback: PrefetchCallback,
+}
+
+#[derive(Clone)]
+struct CachedPage {
+    render_scale_milli: u32,
+    bitmap: Arc<Bitmap>,
 }
 
 enum DocumentSource {
     Image(Arc<Bitmap>),
     Pdf {
         pdf: Arc<Pdf>,
-        cache: Mutex<Vec<Option<Arc<Bitmap>>>>,
-        errors: Mutex<Vec<Option<DocumentError>>>,
-        pending: Mutex<Vec<bool>>,
+        cache: Mutex<Vec<Option<CachedPage>>>,
+        errors: Mutex<Vec<Option<(u32, DocumentError)>>>,
+        pending: Mutex<Vec<Option<u32>>>,
         queue: Mutex<Vec<RenderRequest>>,
         worker_running: AtomicBool,
     },
@@ -170,7 +176,7 @@ impl Document {
                     pdf: Arc::new(pdf),
                     cache: Mutex::new(vec![None; page_count]),
                     errors: Mutex::new(vec![None; page_count]),
-                    pending: Mutex::new(vec![false; page_count]),
+                    pending: Mutex::new(vec![None; page_count]),
                     queue: Mutex::new(Vec::new()),
                     worker_running: AtomicBool::new(false),
                 },
@@ -209,6 +215,52 @@ impl Document {
         self.page_count
     }
 
+    /// Return the unscaled page dimensions in PDF points or image pixels.
+    pub fn page_dimensions(&self, index: usize) -> Result<(f32, f32), DocumentError> {
+        if index >= self.page_count {
+            return Err(DocumentError::new("page index is out of range"));
+        }
+
+        match &self.source {
+            DocumentSource::Image(bitmap) => Ok((bitmap.width() as f32, bitmap.height() as f32)),
+            DocumentSource::Pdf { pdf, .. } => pdf
+                .pages()
+                .get(index)
+                .map(|page| page.render_dimensions())
+                .ok_or_else(|| DocumentError::new("page index is out of range")),
+        }
+    }
+
+    /// Return the PDF render scale needed to cover a physical Canvas size.
+    pub fn render_scale_milli_for(
+        &self,
+        index: usize,
+        physical_width: u32,
+        physical_height: u32,
+    ) -> Result<u32, DocumentError> {
+        if index >= self.page_count {
+            return Err(DocumentError::new("page index is out of range"));
+        }
+
+        match &self.source {
+            DocumentSource::Image(_) => Ok(1_000),
+            DocumentSource::Pdf { pdf, .. } => {
+                let page = pdf
+                    .pages()
+                    .get(index)
+                    .ok_or_else(|| DocumentError::new("page index is out of range"))?;
+                let (page_width, page_height) = page.render_dimensions();
+                let scale = (physical_width.max(1) as f32 / page_width.max(1.0))
+                    .min(physical_height.max(1) as f32 / page_height.max(1.0));
+                Ok(normalize_render_scale_milli(
+                    page_width,
+                    page_height,
+                    (scale * 1_000.0).round() as u32,
+                ))
+            }
+        }
+    }
+
     /// Return a page only when it has already been rendered.
     ///
     /// Unlike [`Document::page`], this method never starts a synchronous PDF
@@ -222,17 +274,61 @@ impl Document {
         match &self.source {
             DocumentSource::Image(bitmap) => Ok(Some(bitmap.clone())),
             DocumentSource::Pdf { cache, errors, .. } => {
-                let errors = errors
-                    .lock()
-                    .map_err(|_| DocumentError::new("PDF render errors are poisoned"))?;
-                if let Some(Some(error)) = errors.get(index) {
-                    return Err(error.clone());
-                }
-
                 let cache = cache
                     .lock()
                     .map_err(|_| DocumentError::new("PDF page cache is poisoned"))?;
-                Ok(cache.get(index).and_then(Option::clone))
+                if let Some(Some(cached)) = cache.get(index) {
+                    return Ok(Some(cached.bitmap.clone()));
+                }
+                drop(cache);
+
+                let errors = errors
+                    .lock()
+                    .map_err(|_| DocumentError::new("PDF render errors are poisoned"))?;
+                if let Some(Some((_, error))) = errors.get(index) {
+                    return Err(error.clone());
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// Return a page only when the requested render scale is cached.
+    pub fn cached_page_at_scale(
+        &self,
+        index: usize,
+        render_scale_milli: u32,
+    ) -> Result<Option<Arc<Bitmap>>, DocumentError> {
+        if index >= self.page_count {
+            return Err(DocumentError::new("page index is out of range"));
+        }
+
+        match &self.source {
+            DocumentSource::Image(bitmap) => Ok(Some(bitmap.clone())),
+            DocumentSource::Pdf {
+                pdf, cache, errors, ..
+            } => {
+                let render_scale_milli =
+                    normalized_render_scale_for_page(pdf, index, render_scale_milli)?;
+                let cache = cache
+                    .lock()
+                    .map_err(|_| DocumentError::new("PDF page cache is poisoned"))?;
+                if let Some(Some(cached)) = cache.get(index)
+                    && cached.render_scale_milli == render_scale_milli
+                {
+                    return Ok(Some(cached.bitmap.clone()));
+                }
+                drop(cache);
+
+                let errors = errors
+                    .lock()
+                    .map_err(|_| DocumentError::new("PDF render errors are poisoned"))?;
+                if let Some(Some((failed_scale, error))) = errors.get(index)
+                    && *failed_scale == render_scale_milli
+                {
+                    return Err(error.clone());
+                }
+                Ok(None)
             }
         }
     }
@@ -245,6 +341,18 @@ impl Document {
     where
         F: FnOnce(Result<(), DocumentError>) + Send + 'static,
     {
+        self.prefetch_at_scale(index, DEFAULT_PDF_RENDER_SCALE_MILLI, callback);
+    }
+
+    /// Request a page at a specific PDF render scale in the background.
+    pub fn prefetch_at_scale<F>(
+        self: &Arc<Self>,
+        index: usize,
+        render_scale_milli: u32,
+        callback: F,
+    ) where
+        F: FnOnce(Result<(), DocumentError>) + Send + 'static,
+    {
         if index >= self.page_count {
             callback(Err(DocumentError::new("page index is out of range")));
             return;
@@ -253,6 +361,7 @@ impl Document {
         let should_start_worker = match &self.source {
             DocumentSource::Image(_) => return,
             DocumentSource::Pdf {
+                pdf,
                 cache,
                 errors,
                 pending,
@@ -260,6 +369,14 @@ impl Document {
                 worker_running,
                 ..
             } => {
+                let render_scale_milli =
+                    match normalized_render_scale_for_page(pdf, index, render_scale_milli) {
+                        Ok(render_scale_milli) => render_scale_milli,
+                        Err(error) => {
+                            callback(Err(error));
+                            return;
+                        }
+                    };
                 let mut pending = match pending.lock() {
                     Ok(pending) => pending,
                     Err(_) => {
@@ -268,7 +385,7 @@ impl Document {
                     }
                 };
 
-                if pending.get(index).copied().unwrap_or(false) {
+                if pending.get(index).is_some_and(|pending| pending.is_some()) {
                     return;
                 }
 
@@ -280,7 +397,11 @@ impl Document {
                     }
                 };
 
-                if cache.get(index).and_then(Option::as_ref).is_some() {
+                if cache
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|cached| cached.render_scale_milli == render_scale_milli)
+                {
                     return;
                 }
 
@@ -291,7 +412,9 @@ impl Document {
                         return;
                     }
                 };
-                if let Some(Some(error)) = errors.get(index) {
+                if let Some(Some((failed_scale, error))) = errors.get(index)
+                    && *failed_scale == render_scale_milli
+                {
                     callback(Err(error.clone()));
                     return;
                 }
@@ -300,7 +423,7 @@ impl Document {
                     callback(Err(DocumentError::new("page index is out of range")));
                     return;
                 };
-                *slot = true;
+                *slot = Some(render_scale_milli);
                 drop(errors);
                 drop(cache);
                 drop(pending);
@@ -309,13 +432,14 @@ impl Document {
                     Ok(queue) => queue,
                     Err(_) => {
                         let result = Err(DocumentError::new("PDF render queue is poisoned"));
-                        self.finish_prefetch(index, &result);
+                        self.finish_prefetch(index, render_scale_milli, &result);
                         callback(result);
                         return;
                     }
                 };
                 queue.push(RenderRequest {
                     index,
+                    render_scale_milli,
                     callback: Box::new(callback),
                 });
                 drop(queue);
@@ -338,10 +462,14 @@ impl Document {
             return Err(DocumentError::new("page index is out of range"));
         }
 
-        self.render_page_now(index)
+        self.render_page_now(index, DEFAULT_PDF_RENDER_SCALE_MILLI)
     }
 
-    fn render_page_now(&self, index: usize) -> Result<Arc<Bitmap>, DocumentError> {
+    fn render_page_now(
+        &self,
+        index: usize,
+        render_scale_milli: u32,
+    ) -> Result<Arc<Bitmap>, DocumentError> {
         if index >= self.page_count {
             return Err(DocumentError::new("page index is out of range"));
         }
@@ -351,11 +479,15 @@ impl Document {
             DocumentSource::Pdf {
                 pdf, cache, errors, ..
             } => {
+                let render_scale_milli =
+                    normalized_render_scale_for_page(pdf, index, render_scale_milli)?;
                 {
                     let errors = errors
                         .lock()
                         .map_err(|_| DocumentError::new("PDF render errors are poisoned"))?;
-                    if let Some(Some(error)) = errors.get(index) {
+                    if let Some(Some((failed_scale, error))) = errors.get(index)
+                        && *failed_scale == render_scale_milli
+                    {
                         return Err(error.clone());
                     }
                 }
@@ -364,17 +496,22 @@ impl Document {
                     let cache = cache
                         .lock()
                         .map_err(|_| DocumentError::new("PDF page cache is poisoned"))?;
-                    if let Some(Some(bitmap)) = cache.get(index) {
-                        return Ok(bitmap.clone());
+                    if let Some(Some(cached)) = cache.get(index)
+                        && cached.render_scale_milli == render_scale_milli
+                    {
+                        return Ok(cached.bitmap.clone());
                     }
                 }
 
-                let bitmap = Arc::new(render_pdf_page(pdf, index)?);
+                let bitmap = Arc::new(render_pdf_page(pdf, index, render_scale_milli)?);
                 let mut cache = cache
                     .lock()
                     .map_err(|_| DocumentError::new("PDF page cache is poisoned"))?;
                 if let Some(slot) = cache.get_mut(index) {
-                    *slot = Some(bitmap.clone());
+                    *slot = Some(CachedPage {
+                        render_scale_milli,
+                        bitmap: bitmap.clone(),
+                    });
                 }
                 if let Ok(mut errors) = errors.lock()
                     && let Some(slot) = errors.get_mut(index)
@@ -386,7 +523,12 @@ impl Document {
         }
     }
 
-    fn finish_prefetch(&self, index: usize, result: &Result<(), DocumentError>) {
+    fn finish_prefetch(
+        &self,
+        index: usize,
+        render_scale_milli: u32,
+        result: &Result<(), DocumentError>,
+    ) {
         let DocumentSource::Pdf {
             errors, pending, ..
         } = &self.source
@@ -396,14 +538,15 @@ impl Document {
 
         if let Ok(mut pending) = pending.lock()
             && let Some(slot) = pending.get_mut(index)
+            && *slot == Some(render_scale_milli)
         {
-            *slot = false;
+            *slot = None;
         }
         if let Err(error) = result
             && let Ok(mut errors) = errors.lock()
             && let Some(slot) = errors.get_mut(index)
         {
-            *slot = Some(error.clone());
+            *slot = Some((render_scale_milli, error.clone()));
         }
     }
 
@@ -444,8 +587,10 @@ impl Document {
                 return;
             };
 
-            let result = self.render_page_now(request.index).map(|_| ());
-            self.finish_prefetch(request.index, &result);
+            let result = self
+                .render_page_now(request.index, request.render_scale_milli)
+                .map(|_| ());
+            self.finish_prefetch(request.index, request.render_scale_milli, &result);
             (request.callback)(result);
         }
     }
@@ -458,13 +603,17 @@ fn is_pdf(path: &Path, bytes: &[u8]) -> bool {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
 }
 
-fn render_pdf_page(pdf: &Pdf, index: usize) -> Result<Bitmap, DocumentError> {
+fn render_pdf_page(
+    pdf: &Pdf,
+    index: usize,
+    render_scale_milli: u32,
+) -> Result<Bitmap, DocumentError> {
     let page = pdf
         .pages()
         .get(index)
         .ok_or_else(|| DocumentError::new("page index is out of range"))?;
     let (width, height) = page.render_dimensions();
-    let scale = PDF_RENDER_SCALE
+    let scale = (render_scale_milli as f32 / 1_000.0)
         .min(PDF_MAX_DIMENSION / width.max(1.0))
         .min(PDF_MAX_DIMENSION / height.max(1.0))
         .max(0.01);
@@ -485,6 +634,29 @@ fn render_pdf_page(pdf: &Pdf, index: usize) -> Result<Bitmap, DocumentError> {
         u32::from(pixmap.height()),
         pixmap.data_as_u8_slice().to_vec(),
     )
+}
+
+fn normalized_render_scale_for_page(
+    pdf: &Pdf,
+    index: usize,
+    render_scale_milli: u32,
+) -> Result<u32, DocumentError> {
+    let page = pdf
+        .pages()
+        .get(index)
+        .ok_or_else(|| DocumentError::new("page index is out of range"))?;
+    let (width, height) = page.render_dimensions();
+    Ok(normalize_render_scale_milli(
+        width,
+        height,
+        render_scale_milli,
+    ))
+}
+
+fn normalize_render_scale_milli(width: f32, height: f32, render_scale_milli: u32) -> u32 {
+    let max_scale = (PDF_MAX_DIMENSION / width.max(height).max(1.0)).max(0.01);
+    let max_scale_milli = (max_scale * 1_000.0).round().max(1.0) as u32;
+    render_scale_milli.max(1).min(max_scale_milli)
 }
 
 #[cfg(test)]

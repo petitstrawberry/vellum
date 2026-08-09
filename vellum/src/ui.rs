@@ -1,11 +1,12 @@
 //! ScarletUI frontend for Vellum.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
-    BitmapImage, Button, Color, HeaderBar, Image, ImageFit, KeyCode, KeyEvent, MenuBarModel,
-    ScrollAxis, ScrollView, Size, State, Text, Window, WindowGroup, hstack, vstack,
+    Button, CanvasView, Color, HeaderBar, Icon, KeyCode, KeyEvent, MenuBarModel, ScrollAxis,
+    ScrollView, Size, State, Text, Window, WindowGroup, hstack, vstack, zstack,
 };
 use scarlet_ui_macros::View;
 use vellum_core::Document;
@@ -99,6 +100,33 @@ impl VellumApp {
         });
     }
 
+    fn request_page_at_scale(&self, page: usize, render_scale_milli: u32) {
+        let Some(document) = self.document.get() else {
+            return;
+        };
+
+        let current_page = self.current_page.clone();
+        let render_revision = self.render_revision.clone();
+        let status = self.status.clone();
+        let title = document.title().to_string();
+        let page_count = document.page_count();
+        document.prefetch_at_scale(page, render_scale_milli, move |result| {
+            if current_page.get() != page {
+                return;
+            }
+
+            match result {
+                Ok(()) => {
+                    render_revision.update(|revision| {
+                        *revision = revision.wrapping_add(1);
+                    });
+                    status.set(format!("{} — page {} of {}", title, page + 1, page_count));
+                }
+                Err(error) => status.set(format!("Could not render page: {error}")),
+            }
+        });
+    }
+
     fn prefetch_neighbors(&self, page: usize) {
         if page > 0 {
             self.request_page(page - 1);
@@ -147,6 +175,32 @@ impl VellumApp {
         self.fit_to_window.set(true);
     }
 
+    fn draw_canvas(
+        &self,
+        buffer: &mut [u8],
+        width: u32,
+        height: u32,
+        page: usize,
+        fallback: Option<Arc<vellum_core::Bitmap>>,
+    ) {
+        let Some(document) = self.document.get() else {
+            fill_canvas(buffer, [38, 40, 46, 255]);
+            return;
+        };
+
+        let render_scale_milli = document
+            .render_scale_milli_for(page, width, height)
+            .unwrap_or(1_000);
+        self.request_page_at_scale(page, render_scale_milli);
+
+        let bitmap = document
+            .cached_page_at_scale(page, render_scale_milli)
+            .ok()
+            .flatten()
+            .or(fallback);
+        draw_bitmap_to_canvas(buffer, width, height, bitmap.as_deref());
+    }
+
     fn handle_key(&self, event: KeyEvent) -> bool {
         match event {
             KeyEvent::Pressed { keycode, .. } => match keycode {
@@ -193,23 +247,16 @@ impl VellumApp {
         let bitmap = self.current_bitmap();
         let zoom = self.zoom.get();
         let fit_to_window = self.fit_to_window.get();
-        let (width, height) = bitmap
-            .as_ref()
-            .map(|bitmap| (bitmap.width(), bitmap.height()))
-            .unwrap_or((640, 480));
-        let image = bitmap
-            .map(|bitmap| BitmapImage::from_bgra(bitmap.to_bgra_words(), width, height))
-            .map(Image::from_bitmap)
-            .unwrap_or_else(|| Image::placeholder(width, height))
-            .fit_mode(if fit_to_window {
-                ImageFit::Contain
-            } else {
-                ImageFit::Fill
-            });
+        let page = self.current_page.get();
+        let (page_width, page_height) = self
+            .document
+            .get()
+            .and_then(|document| document.page_dimensions(page).ok())
+            .unwrap_or((640.0, 480.0));
         let (content_width, content_height) = if fit_to_window {
             (f32::INFINITY, f32::INFINITY)
         } else {
-            (width as f32 * zoom, height as f32 * zoom)
+            (page_width * zoom, page_height * zoom)
         };
 
         let previous = self.clone();
@@ -219,45 +266,65 @@ impl VellumApp {
         let fit = self.clone();
         let actual_size = self.clone();
         let key_app = self.clone();
-        let page = self.current_page.get();
         let page_count = self.page_count();
         let zoom_label = if fit_to_window {
             String::from("Fit")
         } else {
             format!("{}%", (zoom * 100.0).round() as u32)
         };
+        let canvas_app = self.clone();
+        let canvas_fallback = bitmap.clone();
+        let canvas = CanvasView::new(
+            content_width,
+            content_height,
+            Rc::new(move |buffer, width, height| {
+                canvas_app.draw_canvas(buffer, width, height, page, canvas_fallback.clone());
+            }),
+        );
+        let canvas_content = zstack! {
+            canvas.frame(content_width, content_height),
+        }
+        .alignment(Alignment::Center);
+        let scroll = ScrollView::new(canvas_content).axes(ScrollAxis::Both);
+        let scroll = if fit_to_window {
+            scroll
+        } else {
+            scroll.content_size(content_width, content_height)
+        };
 
         vstack! {
             HeaderBar::new(
                 hstack! {
-                    Button::new("Previous")
+                    Button::icon_only(Icon::ChevronLeft)
+                        .header_style()
                         .on_click(move || previous.move_page(-1)),
-                    Button::new("Next")
+                    Button::icon_only(Icon::ChevronRight)
+                        .header_style()
                         .on_click(move || next.move_page(1)),
                     Spacer::new(),
                     Text::new(format!("Page {} / {}", page + 1, page_count))
                         .font_size(13.0),
                     Spacer::new(),
-                    Button::new("Fit")
+                    Button::icon_only(Icon::ArrowsMaximize)
+                        .header_style()
                         .on_click(move || fit.fit_to_window()),
                     Button::new("100%")
+                        .header_style()
                         .on_click(move || actual_size.set_zoom(1.0)),
-                    Button::new("−")
+                    Button::icon_only(Icon::ZoomOut)
+                        .header_style()
                         .on_click(move || zoom_out.change_zoom(0.8)),
                     Text::new(zoom_label)
                         .font_size(13.0)
                         .frame_width(56.0),
-                    Button::new("+")
+                    Button::icon_only(Icon::ZoomIn)
+                        .header_style()
                         .on_click(move || zoom_in.change_zoom(1.25)),
                 }
                 .spacing(8.0)
                 .padding(10.0),
             ),
-            ScrollView::new(
-                image
-                    .frame(content_width, content_height),
-            )
-            .axes(ScrollAxis::Both)
+            scroll
             .frame(f32::INFINITY, f32::INFINITY)
             .background(Color::rgb(38, 40, 46)),
             Text::from_state(self.status.clone())
@@ -267,6 +334,64 @@ impl VellumApp {
         }
         .frame(f32::INFINITY, f32::INFINITY)
         .on_key(move |event| key_app.handle_key(event))
+    }
+}
+
+fn fill_canvas(buffer: &mut [u8], color: [u8; 4]) {
+    for pixel in buffer.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&color);
+    }
+}
+
+fn draw_bitmap_to_canvas(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    bitmap: Option<&vellum_core::Bitmap>,
+) {
+    fill_canvas(buffer, [38, 40, 46, 255]);
+
+    let Some(bitmap) = bitmap else {
+        return;
+    };
+    let source_width = bitmap.width();
+    let source_height = bitmap.height();
+    if source_width == 0 || source_height == 0 || canvas_width == 0 || canvas_height == 0 {
+        return;
+    }
+
+    let scale_x = canvas_width as f32 / source_width as f32;
+    let scale_y = canvas_height as f32 / source_height as f32;
+    let scale = scale_x.min(scale_y).max(0.001);
+    let draw_width = ((source_width as f32 * scale).round() as u32)
+        .max(1)
+        .min(canvas_width);
+    let draw_height = ((source_height as f32 * scale).round() as u32)
+        .max(1)
+        .min(canvas_height);
+    let offset_x = (canvas_width - draw_width) / 2;
+    let offset_y = (canvas_height - draw_height) / 2;
+    let source = bitmap.rgba();
+
+    for y in 0..draw_height {
+        let source_y = ((u64::from(y) * u64::from(source_height)) / u64::from(draw_height))
+            .min(u64::from(source_height - 1)) as usize;
+        for x in 0..draw_width {
+            let source_x = ((u64::from(x) * u64::from(source_width)) / u64::from(draw_width))
+                .min(u64::from(source_width - 1)) as usize;
+            let source_offset = (source_y * source_width as usize + source_x) * 4;
+            let destination_offset = ((u64::from(offset_y + y) * u64::from(canvas_width)
+                + u64::from(offset_x + x))
+                * 4) as usize;
+            let Some(pixel) = source.get(source_offset..source_offset + 4) else {
+                continue;
+            };
+            let Some(destination) = buffer.get_mut(destination_offset..destination_offset + 4)
+            else {
+                continue;
+            };
+            destination.copy_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+        }
     }
 }
 
