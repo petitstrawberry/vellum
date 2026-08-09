@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
-    BitmapImage, Button, Color, Image, ImageFit, KeyCode, KeyEvent, MenuBarModel, ScrollAxis,
-    ScrollView, Size, State, Text, Window, WindowGroup, hstack, vstack,
+    BitmapImage, Button, Color, HeaderBar, Image, ImageFit, KeyCode, KeyEvent, MenuBarModel,
+    ScrollAxis, ScrollView, Size, State, Text, Window, WindowGroup, hstack, vstack,
 };
 use scarlet_ui_macros::View;
 use vellum_core::Document;
@@ -185,29 +185,31 @@ impl VellumApp {
         };
 
         vstack! {
-            hstack! {
-                Button::new("Previous")
-                    .on_click(move || previous.move_page(-1)),
-                Button::new("Next")
-                    .on_click(move || next.move_page(1)),
-                Spacer::new(),
-                Text::new(format!("Page {} / {}", page + 1, page_count))
-                    .font_size(13.0),
-                Spacer::new(),
-                Button::new("Fit")
-                    .on_click(move || fit.fit_to_window()),
-                Button::new("100%")
-                    .on_click(move || actual_size.set_zoom(1.0)),
-                Button::new("−")
-                    .on_click(move || zoom_out.change_zoom(0.8)),
-                Text::new(zoom_label)
-                    .font_size(13.0)
-                    .frame_width(56.0),
-                Button::new("+")
-                    .on_click(move || zoom_in.change_zoom(1.25)),
-            }
-            .spacing(8.0)
-            .padding(10.0),
+            HeaderBar::new(
+                hstack! {
+                    Button::new("Previous")
+                        .on_click(move || previous.move_page(-1)),
+                    Button::new("Next")
+                        .on_click(move || next.move_page(1)),
+                    Spacer::new(),
+                    Text::new(format!("Page {} / {}", page + 1, page_count))
+                        .font_size(13.0),
+                    Spacer::new(),
+                    Button::new("Fit")
+                        .on_click(move || fit.fit_to_window()),
+                    Button::new("100%")
+                        .on_click(move || actual_size.set_zoom(1.0)),
+                    Button::new("−")
+                        .on_click(move || zoom_out.change_zoom(0.8)),
+                    Text::new(zoom_label)
+                        .font_size(13.0)
+                        .frame_width(56.0),
+                    Button::new("+")
+                        .on_click(move || zoom_in.change_zoom(1.25)),
+                }
+                .spacing(8.0)
+                .padding(10.0),
+            ),
             ScrollView::new(
                 image
                     .frame(content_width, content_height),

@@ -1,3 +1,7 @@
+[patch.crates-io]
+# Keep PDF rendering pure Rust while accepting legacy Mac Japanese fonts.
+hayro-interpret = { path = "vendor/hayro-interpret" }
+
 [workspace]
 members = ["vellum-core", "vellum"]
 resolver = "2"

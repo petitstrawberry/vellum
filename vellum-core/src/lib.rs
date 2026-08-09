@@ -13,7 +13,10 @@ use hayro::hayro_interpret::{InterpreterSettings, hayro_syntax::Pdf};
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{RenderCache, RenderSettings, render};
 
-const PDF_RENDER_SCALE: f32 = 1.25;
+// Render at 144 DPI for 72-point PDF coordinates. This keeps text legible
+// after the page is fitted to a window while the bitmap-size guards below
+// prevent pathological documents from allocating unbounded memory.
+const PDF_RENDER_SCALE: f32 = 2.0;
 const PDF_MAX_DIMENSION: f32 = 4096.0;
 const MAX_BITMAP_PIXELS: u64 = 64 * 1024 * 1024;
 
