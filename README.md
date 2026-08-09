@@ -1,7 +1,7 @@
 # Vellum
 
-Vellum is a small image and PDF viewer written in pure Rust. Its frontend uses
-ScarletUI, with Winit and SWS providing the platform backends.
+Vellum is a small image and PDF viewer written in pure Rust, built with
+ScarletUI.
 
 The viewer is split into two crates:
 
@@ -13,34 +13,18 @@ The viewer is split into two crates:
 PDF pages are rendered lazily and cached. PDF rasterization uses Hayro; image
 decoding uses the pure-Rust `image` codecs enabled in `vellum-core`.
 
-## Host
-
-On an Apple Silicon Mac:
+## Run
 
 ```bash
-cargo run -p vellum --target aarch64-apple-darwin -- path/to/file.pdf
+cargo run -p vellum -- path/to/file.pdf
 ```
 
-Use `x86_64-apple-darwin` on an Intel Mac, or the appropriate host target on
-Linux. The headless core is also useful for smoke tests:
+The headless core is also useful for smoke tests:
 
 ```bash
 cargo run -p vellum --no-default-features -- \
   --dump-png page.png --page 0 path/to/file.pdf
 ```
-
-## ScarletUI/SWS
-
-Enter the SDK development shell and build the ScarletUI/SWS frontend:
-
-```bash
-nix develop
-cargo build -p vellum --release --target riscv64gc-unknown-scarlet
-cargo build -p vellum --release --target aarch64-unknown-scarlet
-```
-
-The resulting `vellum` binary can be placed in a Scarlet filesystem image as
-`/bin/vellum`. Its application identifier is `org.scarlet-os.vellum`.
 
 ## Controls
 
