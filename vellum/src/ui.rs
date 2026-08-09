@@ -305,7 +305,7 @@ impl VellumApp {
                     Text::new(format!("Page {} / {}", page + 1, page_count))
                         .font_size(13.0),
                     Spacer::new(),
-                    Button::icon_only(Icon::ArrowsMaximize)
+                    Button::new("Fit")
                         .header_style()
                         .on_click(move || fit.fit_to_window()),
                     Button::new("100%")
@@ -314,9 +314,12 @@ impl VellumApp {
                     Button::icon_only(Icon::ZoomOut)
                         .header_style()
                         .on_click(move || zoom_out.change_zoom(0.8)),
-                    Text::new(zoom_label)
-                        .font_size(13.0)
-                        .frame_width(56.0),
+                    hstack! {
+                        Spacer::new(),
+                        Text::new(zoom_label).font_size(13.0),
+                        Spacer::new(),
+                    }
+                    .frame_width(56.0),
                     Button::icon_only(Icon::ZoomIn)
                         .header_style()
                         .on_click(move || zoom_in.change_zoom(1.25)),
