@@ -1,15 +1,14 @@
 # Vellum
 
-Vellum is a small image and PDF viewer written in pure Rust. The same
-workspace targets host systems through ScarletUI/Winit and Scarlet OS through
-ScarletUI/SWS.
+Vellum is a small image and PDF viewer written in pure Rust. Its frontend uses
+ScarletUI, with Winit and SWS providing the platform backends.
 
 The viewer is split into two crates:
 
 - `vellum-core` loads common image formats and PDFs, then rasterizes them into
   RGBA bitmaps. It has no Scarlet dependency.
-- `vellum` provides the desktop and ScarletUI frontends, including page
-  navigation, zooming, and scrolling.
+- `vellum` provides the frontends, including page navigation, zooming, and
+  scrolling.
 
 PDF pages are rendered lazily and cached. PDF rasterization uses Hayro; image
 decoding uses the pure-Rust `image` codecs enabled in `vellum-core`.
@@ -30,9 +29,9 @@ cargo run -p vellum --no-default-features -- \
   --dump-png page.png --page 0 path/to/file.pdf
 ```
 
-## Scarlet OS
+## ScarletUI/SWS
 
-Enter the SDK development shell and build for either supported Scarlet target:
+Enter the SDK development shell and build the ScarletUI/SWS frontend:
 
 ```bash
 nix develop
@@ -55,4 +54,4 @@ The resulting `vellum` binary can be placed in a Scarlet filesystem image as
 
 ## License
 
-Vellum is dual-licensed under the MIT License or Apache License 2.0.
+Vellum is licensed under the MIT License.

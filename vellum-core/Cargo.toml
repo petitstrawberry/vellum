@@ -3,7 +3,7 @@ name = "vellum-core"
 version = "0.1.0"
 edition = "2024"
 description = "Pure-Rust image and PDF loading and rasterization core for Vellum"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [dependencies]
 hayro = { version = "0.7.1", default-features = true }
