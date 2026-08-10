@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
-    Button, CanvasView, Color, HeaderBar, Icon, KeyCode, KeyEvent, MenuBarModel, ScrollAxis,
-    ScrollView, Size, State, Text, Window, WindowGroup, hstack, vstack, zstack,
+    Button, CanvasView, Color, HeaderBar, Icon, KeyCode, KeyEvent, MenuBarModel, PlatformWindow,
+    Rectangle, ScrollAxis, ScrollView, Size, State, Text, Window, WindowGroup, hstack, vstack,
+    zstack,
 };
 use scarlet_ui_macros::View;
 use vellum_core::Document;
@@ -34,6 +35,10 @@ struct VellumApp {
     render_revision: State<u64>,
     zoom: State<f32>,
     fit_to_window: State<bool>,
+    fullscreen: State<bool>,
+    fullscreen_applied: State<bool>,
+    decorations_hidden: State<bool>,
+    chrome_visible: State<bool>,
     status: State<String>,
 }
 
@@ -165,6 +170,7 @@ impl VellumApp {
     fn set_zoom(&self, zoom: f32) {
         self.fit_to_window.set(false);
         self.zoom.set(zoom.clamp(MIN_ZOOM, MAX_ZOOM));
+        self.show_chrome();
     }
 
     fn change_zoom(&self, factor: f32) {
@@ -173,6 +179,28 @@ impl VellumApp {
 
     fn fit_to_window(&self) {
         self.fit_to_window.set(true);
+        self.show_chrome();
+    }
+
+    fn set_fullscreen_mode(&self, fullscreen: bool) {
+        self.fullscreen.set(fullscreen);
+        self.chrome_visible.set(!fullscreen);
+    }
+
+    fn toggle_fullscreen(&self) {
+        self.set_fullscreen_mode(!self.fullscreen.get());
+    }
+
+    fn show_chrome(&self) {
+        if self.fullscreen.get() {
+            self.chrome_visible.set(true);
+        }
+    }
+
+    fn hide_chrome(&self) {
+        if self.fullscreen.get() {
+            self.chrome_visible.set(false);
+        }
     }
 
     fn draw_canvas(
@@ -204,6 +232,14 @@ impl VellumApp {
     fn handle_key(&self, event: KeyEvent) -> bool {
         match event {
             KeyEvent::Pressed { keycode, .. } => match keycode {
+                KeyCode::F(11) => {
+                    self.toggle_fullscreen();
+                    true
+                }
+                KeyCode::Escape if self.fullscreen.get() => {
+                    self.set_fullscreen_mode(false);
+                    true
+                }
                 KeyCode::Left | KeyCode::PageUp => {
                     self.move_page(-1);
                     true
@@ -265,8 +301,11 @@ impl VellumApp {
         let zoom_in = self.clone();
         let fit = self.clone();
         let actual_size = self.clone();
+        let fullscreen = self.clone();
         let key_app = self.clone();
         let page_count = self.page_count();
+        let fullscreen_mode = self.fullscreen.get();
+        let chrome_visible = self.chrome_visible.get();
         let zoom_label = if fit_to_window {
             String::from("Fit")
         } else {
@@ -292,48 +331,90 @@ impl VellumApp {
             scroll.content_size(content_width, content_height)
         };
 
-        vstack! {
-            HeaderBar::new(
+        let header = HeaderBar::new(
+            hstack! {
+                Button::icon_only(Icon::ChevronLeft)
+                    .header_style()
+                    .on_click(move || previous.move_page(-1)),
+                Button::icon_only(Icon::ChevronRight)
+                    .header_style()
+                    .on_click(move || next.move_page(1)),
+                Spacer::new(),
+                Text::new(format!("Page {} / {}", page + 1, page_count))
+                    .font_size(13.0),
+                Spacer::new(),
+                Button::new("Fit")
+                    .header_style()
+                    .on_click(move || fit.fit_to_window()),
+                Button::new("100%")
+                    .header_style()
+                    .on_click(move || actual_size.set_zoom(1.0)),
+                Button::icon_only(Icon::ZoomOut)
+                    .header_style()
+                    .on_click(move || zoom_out.change_zoom(0.8)),
                 hstack! {
-                    Button::icon_only(Icon::ChevronLeft)
-                        .header_style()
-                        .on_click(move || previous.move_page(-1)),
-                    Button::icon_only(Icon::ChevronRight)
-                        .header_style()
-                        .on_click(move || next.move_page(1)),
                     Spacer::new(),
-                    Text::new(format!("Page {} / {}", page + 1, page_count))
-                        .font_size(13.0),
+                    Text::new(zoom_label).font_size(13.0),
                     Spacer::new(),
-                    Button::new("Fit")
-                        .header_style()
-                        .on_click(move || fit.fit_to_window()),
-                    Button::new("100%")
-                        .header_style()
-                        .on_click(move || actual_size.set_zoom(1.0)),
-                    Button::icon_only(Icon::ZoomOut)
-                        .header_style()
-                        .on_click(move || zoom_out.change_zoom(0.8)),
-                    hstack! {
-                        Spacer::new(),
-                        Text::new(zoom_label).font_size(13.0),
-                        Spacer::new(),
-                    }
-                    .frame_width(56.0),
+                }
+                .frame_width(56.0),
+                hstack! {
                     Button::icon_only(Icon::ZoomIn)
                         .header_style()
                         .on_click(move || zoom_in.change_zoom(1.25)),
+                    Button::icon_only(if fullscreen_mode {
+                        Icon::ArrowsMinimize
+                    } else {
+                        Icon::ArrowsMaximize
+                    })
+                    .header_style()
+                    .on_click(move || fullscreen.toggle_fullscreen()),
                 }
-                .spacing(8.0)
-                .padding(10.0),
-            ),
-            scroll
-            .frame(f32::INFINITY, f32::INFINITY)
-            .background(Color::rgb(38, 40, 46)),
+                .spacing(8.0),
+            }
+            .spacing(8.0)
+            .padding(10.0),
+        );
+        let show_chrome = self.clone();
+        let hide_chrome = self.clone();
+        let hidden_chrome = Rectangle::new()
+            .fill(Color::TRANSPARENT)
+            .frame(f32::INFINITY, 48.0);
+        let chrome_content =
+            scarlet_ui::if_view!(!fullscreen_mode || chrome_visible, header, hidden_chrome);
+        let chrome_hit_area = Rectangle::new()
+            .fill(Color::TRANSPARENT)
+            .frame(f32::INFINITY, 48.0);
+        let chrome = zstack! {
+            chrome_hit_area,
+            chrome_content,
+        }
+        .alignment(Alignment::Top)
+        .frame(f32::INFINITY, 48.0)
+        .on_hover(move || show_chrome.show_chrome())
+        .on_exit(move || hide_chrome.hide_chrome());
+        let hidden_status = Rectangle::new()
+            .fill(Color::TRANSPARENT)
+            .frame(f32::INFINITY, 0.0);
+        let status = scarlet_ui::if_view!(
+            !fullscreen_mode,
             Text::from_state(self.status.clone())
                 .font_size(12.0)
                 .padding(8.0)
                 .frame(f32::INFINITY, 32.0),
+            hidden_status
+        );
+        let viewer = zstack! {
+            scroll
+                .frame(f32::INFINITY, f32::INFINITY),
+            chrome,
+        }
+        .alignment(Alignment::Top)
+        .frame(f32::INFINITY, f32::INFINITY);
+
+        vstack! {
+            viewer.background(Color::rgb(38, 40, 46)),
+            status,
         }
         .frame(f32::INFINITY, f32::INFINITY)
         .on_key(move |event| key_app.handle_key(event))
@@ -399,6 +480,44 @@ fn draw_bitmap_to_canvas(
 }
 
 impl Application for VellumApp {
+    fn on_window_sync(&mut self, _ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+        let desired = self.fullscreen.get();
+        let applied = self.fullscreen_applied.get();
+
+        if desired == applied {
+            return;
+        }
+
+        if window.set_fullscreen(desired).is_ok() {
+            self.fullscreen_applied.set(desired);
+        } else {
+            self.fullscreen.set(applied);
+            self.chrome_visible.set(!applied);
+            self.status.set(if desired {
+                String::from("Could not enter fullscreen")
+            } else {
+                String::from("Could not leave fullscreen")
+            });
+        }
+    }
+
+    fn on_window_fullscreen_changed(&mut self, _ctx: &WindowContext, fullscreen: bool) {
+        self.fullscreen.set(fullscreen);
+        self.fullscreen_applied.set(fullscreen);
+        self.decorations_hidden.set(fullscreen);
+        self.chrome_visible.set(!fullscreen);
+    }
+
+    fn on_window_resize(&mut self, _ctx: &WindowContext, _width: u32, _height: u32) {
+        let fullscreen = self.fullscreen.get();
+
+        if self.fullscreen_applied.get() == fullscreen
+            && self.decorations_hidden.get() != fullscreen
+        {
+            self.decorations_hidden.set(fullscreen);
+        }
+    }
+
     fn scenes(&self) -> impl Scene {
         let title = self
             .document
@@ -411,6 +530,7 @@ impl Application for VellumApp {
             Window::new(title, self.content())
                 .app_id(APP_ID)
                 .menu_bar(MenuBarModel::new(Vec::new()))
+                .decorated(!self.decorations_hidden.get())
                 .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT)),
         )
     }
