@@ -170,7 +170,6 @@ impl VellumApp {
     fn set_zoom(&self, zoom: f32) {
         self.fit_to_window.set(false);
         self.zoom.set(zoom.clamp(MIN_ZOOM, MAX_ZOOM));
-        self.show_chrome();
     }
 
     fn change_zoom(&self, factor: f32) {
@@ -179,7 +178,6 @@ impl VellumApp {
 
     fn fit_to_window(&self) {
         self.fit_to_window.set(true);
-        self.show_chrome();
     }
 
     fn set_fullscreen_mode(&self, fullscreen: bool) {
@@ -191,15 +189,9 @@ impl VellumApp {
         self.set_fullscreen_mode(!self.fullscreen.get());
     }
 
-    fn show_chrome(&self) {
+    fn update_chrome_visibility(&self, y: i32) {
         if self.fullscreen.get() {
-            self.chrome_visible.set(true);
-        }
-    }
-
-    fn hide_chrome(&self) {
-        if self.fullscreen.get() {
-            self.chrome_visible.set(false);
+            self.chrome_visible.set(y < 48);
         }
     }
 
@@ -375,24 +367,11 @@ impl VellumApp {
             .spacing(8.0)
             .padding(10.0),
         );
-        let show_chrome = self.clone();
-        let hide_chrome = self.clone();
         let hidden_chrome = Rectangle::new()
             .fill(Color::TRANSPARENT)
             .frame(f32::INFINITY, 48.0);
-        let chrome_content =
+        let chrome =
             scarlet_ui::if_view!(!fullscreen_mode || chrome_visible, header, hidden_chrome);
-        let chrome_hit_area = Rectangle::new()
-            .fill(Color::TRANSPARENT)
-            .frame(f32::INFINITY, 48.0);
-        let chrome = zstack! {
-            chrome_hit_area,
-            chrome_content,
-        }
-        .alignment(Alignment::Top)
-        .frame(f32::INFINITY, 48.0)
-        .on_hover(move || show_chrome.show_chrome())
-        .on_exit(move || hide_chrome.hide_chrome());
         let hidden_status = Rectangle::new()
             .fill(Color::TRANSPARENT)
             .frame(f32::INFINITY, 0.0);
@@ -412,11 +391,13 @@ impl VellumApp {
         .alignment(Alignment::Top)
         .frame(f32::INFINITY, f32::INFINITY);
 
+        let pointer_app = self.clone();
         vstack! {
             viewer.background(Color::rgb(38, 40, 46)),
             status,
         }
         .frame(f32::INFINITY, f32::INFINITY)
+        .on_mouse_move(move |_x, y| pointer_app.update_chrome_visibility(y))
         .on_key(move |event| key_app.handle_key(event))
     }
 }
