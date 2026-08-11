@@ -281,11 +281,8 @@ impl VellumApp {
             .get()
             .and_then(|document| document.page_dimensions(page).ok())
             .unwrap_or((640.0, 480.0));
-        let (content_width, content_height) = if fit_to_window {
-            (f32::INFINITY, f32::INFINITY)
-        } else {
-            (page_width * zoom, page_height * zoom)
-        };
+        let (canvas_width, canvas_height, content_width, content_height) =
+            canvas_layout_dimensions(page_width, page_height, zoom, fit_to_window);
 
         let previous = self.clone();
         let next = self.clone();
@@ -306,8 +303,8 @@ impl VellumApp {
         let canvas_app = self.clone();
         let canvas_fallback = bitmap.clone();
         let canvas = CanvasView::new(
-            content_width,
-            content_height,
+            canvas_width,
+            canvas_height,
             Rc::new(move |buffer, width, height| {
                 canvas_app.draw_canvas(buffer, width, height, page, canvas_fallback.clone());
             }),
@@ -402,6 +399,37 @@ impl VellumApp {
     }
 }
 
+fn canvas_layout_dimensions(
+    page_width: f32,
+    page_height: f32,
+    zoom: f32,
+    fit_to_window: bool,
+) -> (f32, f32, f32, f32) {
+    let page_width = if page_width.is_finite() && page_width > 0.0 {
+        page_width
+    } else {
+        640.0
+    };
+    let page_height = if page_height.is_finite() && page_height > 0.0 {
+        page_height
+    } else {
+        480.0
+    };
+
+    if fit_to_window {
+        return (page_width, page_height, f32::INFINITY, f32::INFINITY);
+    }
+
+    let zoom = if zoom.is_finite() && zoom > 0.0 {
+        zoom
+    } else {
+        1.0
+    };
+    let width = (page_width * zoom).max(1.0);
+    let height = (page_height * zoom).max(1.0);
+    (width, height, width, height)
+}
+
 fn fill_canvas(buffer: &mut [u8], color: [u8; 4]) {
     for pixel in buffer.chunks_exact_mut(4) {
         pixel.copy_from_slice(&color);
@@ -457,6 +485,29 @@ fn draw_bitmap_to_canvas(
             };
             destination.copy_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canvas_layout_dimensions;
+
+    #[test]
+    fn fit_canvas_keeps_a_finite_preferred_size() {
+        let (canvas_width, canvas_height, frame_width, frame_height) =
+            canvas_layout_dimensions(424.0, 424.0, 1.0, true);
+
+        assert_eq!((canvas_width, canvas_height), (424.0, 424.0));
+        assert!(frame_width.is_infinite());
+        assert!(frame_height.is_infinite());
+    }
+
+    #[test]
+    fn invalid_document_dimensions_use_a_finite_fallback() {
+        let (canvas_width, canvas_height, _, _) =
+            canvas_layout_dimensions(f32::INFINITY, f32::NAN, f32::NAN, true);
+
+        assert_eq!((canvas_width, canvas_height), (640.0, 480.0));
     }
 }
 
