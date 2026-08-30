@@ -802,7 +802,7 @@ dependencies = [
 [[package]]
 name = "gpu-raw"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#8228fba3d1e26f6af4f3963e77637d064b86c3ee"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#86eed590fb16133ee574632ebd25d7aaef0dae0b"
 dependencies = [
  "scarlet-os",
 ]
@@ -2032,12 +2032,12 @@ dependencies = [
 [[package]]
 name = "scarlet-abi"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#8228fba3d1e26f6af4f3963e77637d064b86c3ee"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#86eed590fb16133ee574632ebd25d7aaef0dae0b"
 
 [[package]]
 name = "scarlet-os"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#8228fba3d1e26f6af4f3963e77637d064b86c3ee"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#86eed590fb16133ee574632ebd25d7aaef0dae0b"
 dependencies = [
  "scarlet-abi",
  "scarlet-rt",
@@ -2047,7 +2047,7 @@ dependencies = [
 [[package]]
 name = "scarlet-rt"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#8228fba3d1e26f6af4f3963e77637d064b86c3ee"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#86eed590fb16133ee574632ebd25d7aaef0dae0b"
 dependencies = [
  "scarlet-sys",
 ]
@@ -2055,7 +2055,7 @@ dependencies = [
 [[package]]
 name = "scarlet-sys"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#8228fba3d1e26f6af4f3963e77637d064b86c3ee"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#86eed590fb16133ee574632ebd25d7aaef0dae0b"
 dependencies = [
  "scarlet-abi",
 ]
@@ -2203,7 +2203,7 @@ dependencies = [
 [[package]]
 name = "sgfx"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#8228fba3d1e26f6af4f3963e77637d064b86c3ee"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#86eed590fb16133ee574632ebd25d7aaef0dae0b"
 dependencies = [
  "gpu-raw",
  "raw-window-handle",
@@ -2229,7 +2229,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-scarlet-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#8228fba3d1e26f6af4f3963e77637d064b86c3ee"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#86eed590fb16133ee574632ebd25d7aaef0dae0b"
 dependencies = [
  "gpu-raw",
  "scarlet-os",
@@ -2240,7 +2240,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#8228fba3d1e26f6af4f3963e77637d064b86c3ee"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#86eed590fb16133ee574632ebd25d7aaef0dae0b"
 dependencies = [
  "bytemuck",
  "pollster",
@@ -2263,7 +2263,7 @@ dependencies = [
 [[package]]
 name = "sgfx-codegen-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#8228fba3d1e26f6af4f3963e77637d064b86c3ee"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#86eed590fb16133ee574632ebd25d7aaef0dae0b"
 dependencies = [
  "sgfx-core",
 ]
@@ -2271,7 +2271,7 @@ dependencies = [
 [[package]]
 name = "sgfx-core"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#8228fba3d1e26f6af4f3963e77637d064b86c3ee"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#86eed590fb16133ee574632ebd25d7aaef0dae0b"
 
 [[package]]
 name = "shlex"
@@ -2466,7 +2466,7 @@ dependencies = [
 [[package]]
 name = "sws-client"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#8228fba3d1e26f6af4f3963e77637d064b86c3ee"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#86eed590fb16133ee574632ebd25d7aaef0dae0b"
 dependencies = [
  "scarlet-os",
  "sws-protocol",
@@ -2475,7 +2475,7 @@ dependencies = [
 [[package]]
 name = "sws-protocol"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#8228fba3d1e26f6af4f3963e77637d064b86c3ee"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#86eed590fb16133ee574632ebd25d7aaef0dae0b"
 
 [[package]]
 name = "syn"
