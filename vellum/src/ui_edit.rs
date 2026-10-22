@@ -2,7 +2,7 @@
 use super::*;
 use scarlet_ui::file_dialog::{FileDialog, FileDialogMode, FileDialogOutcome};
 use scarlet_ui::{
-    Canvas, Event, MenuEntry, MenuItemModel, MouseButton, MouseEvent, Select, TextField, Toggle,
+    Canvas, Event, MenuEntry, MenuItemModel, MouseButton, MouseEvent, TextField, Toggle,
 };
 use std::path::PathBuf;
 use std::thread;
@@ -737,61 +737,6 @@ impl VellumApp {
             .font_size(13.0)
             .on_click(move || action(&app))
     }
-    fn tool_button(&self, label: &str, tool: Tool, action: impl Fn(&Self) + 'static) -> Button {
-        let palette = ColorPalette::default();
-        let button = self.action_button(label, action);
-        if self.tool.get() == tool {
-            button
-                .background_color(palette.primary_light())
-                .text_color(palette.text_primary())
-                .border_color(palette.primary())
-        } else {
-            button
-        }
-    }
-    pub(super) fn editor_toolbar(&self) -> impl View + Clone + use<> {
-        let ready = self.runtime.get().lock().unwrap().busy.is_none();
-        let palette = ColorPalette::default();
-        let is_image = self.edited_bitmap.get().is_some();
-        let tool = self.tool.get();
-        let crop = scarlet_ui::if_view!(
-            tool == Tool::Crop,
-            self.action_button("Apply Crop", |a| a.crop_selection())
-                .enabled(ready && self.drag.get().is_some())
-                .background_color(palette.primary_light()),
-            Text::new("")
-        );
-        let annotation = scarlet_ui::if_view!(matches!(tool, Tool::Arrow | Tool::Text),
-            hstack! {
-                Text::new("Color").font_size(13.0).color(palette.text_secondary()),
-                Select::new(vec!["Red".into(),"Blue".into(),"Yellow".into(),"White".into(),"Black".into()],self.annotation_color.clone()).width(100.0),
-                scarlet_ui::if_view!(tool == Tool::Arrow,
-                    self.action_button(&format!("{} px", self.stroke_width.get()), |a| {
-                        let width = a.stroke_width.get().parse::<u32>().unwrap_or(4);
-                        a.stroke_width.set(if width >= 16 {1} else {width * 2}.to_string());
-                    }), Text::new("")),
-            }.spacing(8.0), Text::new("")
-        );
-        scarlet_ui::if_view!(is_image,
-            hstack! {
-                Text::new("TOOLS").font_size(13.0).color(palette.text_secondary()),
-                hstack! {
-                    self.tool_button("View", Tool::View, |a| a.set_tool(Tool::View)),
-                    self.tool_button("Crop", Tool::Crop, |a| a.set_tool(Tool::Crop)),
-                    self.tool_button("Arrow", Tool::Arrow, |a| a.set_tool(Tool::Arrow)),
-                    self.tool_button("Text", Tool::Text, |a| a.show_text()),
-                }.spacing(4.0),
-                Rectangle::new().fill(palette.border()).frame(1.0, 24.0),
-                self.action_button("Rotate", |a| a.apply_edit(EditOperation::RotateClockwise)).enabled(ready),
-                self.action_button("Resize…", |a| a.show_resize()).enabled(ready),
-                Spacer::new(),
-                crop,
-                annotation,
-            }.spacing(12.0).padding(10.0).frame_width(f32::INFINITY)
-                .background(palette.surface_variant()),
-            Rectangle::new().fill(Color::TRANSPARENT).frame(f32::INFINITY, 0.0)
-        )
-    }
     pub(super) fn confirm_content(&self) -> impl View + Clone + use<> {
         let palette = ColorPalette::default();
         vstack!{
@@ -856,6 +801,9 @@ impl VellumApp {
         let can_undo = ready && rt.edit.as_ref().is_some_and(|edit| edit.can_undo());
         let can_redo = ready && rt.edit.as_ref().is_some_and(|edit| edit.can_redo());
         drop(rt);
+        let page_count = self.page_count();
+        let page = self.current_page.get();
+        let has_document = ready && (page_count > 0 || self.edited_bitmap.get().is_some());
         let item = |id: &str, title: &str, shortcut: &str, enabled: bool, action: fn(&Self)| {
             let app = self.clone();
             MenuEntry::Item(
@@ -865,6 +813,39 @@ impl VellumApp {
                     .on_activate(Arc::new(move || action(&app))),
             )
         };
+        let colors = ["Red", "Blue", "Yellow", "White", "Black"];
+        let color_items = colors
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let app = self.clone();
+                MenuEntry::Item(
+                    MenuItemModel::new(format!("color-{index}"), *name)
+                        .enabled(can_save)
+                        .on_activate(Arc::new(move || {
+                            if app.edit_ready() {
+                                app.annotation_color.set(index);
+                            }
+                        })),
+                )
+            })
+            .collect();
+        let widths = [1, 2, 4, 8, 16];
+        let width_items = widths
+            .into_iter()
+            .map(|width| {
+                let app = self.clone();
+                MenuEntry::Item(
+                    MenuItemModel::new(format!("width-{width}"), format!("{width} px"))
+                        .enabled(can_save)
+                        .on_activate(Arc::new(move || {
+                            if app.edit_ready() {
+                                app.stroke_width.set(width.to_string());
+                            }
+                        })),
+                )
+            })
+            .collect();
         MenuBarModel::new(vec![
             MenuItemModel::new("file", "File").children(vec![
                 item("open", "Open…", "Ctrl+O", ready, |a| {
@@ -885,6 +866,103 @@ impl VellumApp {
                 item("redo", "Redo", "Ctrl+Shift+Z", can_redo, |a| {
                     a.undo_edit(true)
                 }),
+            ]),
+            MenuItemModel::new("view", "View").children(vec![
+                item("fit", "Fit to Window", "", has_document, |a| {
+                    a.fit_to_window()
+                }),
+                item("actual-size", "Actual Size", "0", has_document, |a| {
+                    a.set_zoom(1.0)
+                }),
+                item("zoom-in", "Zoom In", "+", has_document, |a| {
+                    a.change_zoom(1.25)
+                }),
+                item("zoom-out", "Zoom Out", "−", has_document, |a| {
+                    a.change_zoom(0.8)
+                }),
+                MenuEntry::Separator,
+                item(
+                    "previous-page",
+                    "Previous Page",
+                    "PageUp",
+                    ready && page > 0,
+                    |a| a.move_page(-1),
+                ),
+                item(
+                    "next-page",
+                    "Next Page",
+                    "PageDown",
+                    ready && page + 1 < page_count,
+                    |a| a.move_page(1),
+                ),
+                item("first-page", "First Page", "Home", ready && page > 0, |a| {
+                    a.move_page(-(a.current_page.get() as isize))
+                }),
+                item(
+                    "last-page",
+                    "Last Page",
+                    "End",
+                    ready && page + 1 < page_count,
+                    |a| a.move_page(a.page_count() as isize),
+                ),
+                MenuEntry::Separator,
+                item(
+                    "fullscreen",
+                    if self.fullscreen.get() {
+                        "Leave Fullscreen"
+                    } else {
+                        "Enter Fullscreen"
+                    },
+                    "F11",
+                    true,
+                    |a| a.toggle_fullscreen(),
+                ),
+            ]),
+            MenuItemModel::new("image", "Image").children(vec![
+                item("browse", "View Image", "", can_save, |a| {
+                    a.set_tool(Tool::View)
+                }),
+                item("crop", "Select Crop Area", "", can_save, |a| {
+                    a.set_tool(Tool::Crop)
+                }),
+                item(
+                    "apply-crop",
+                    "Apply Crop",
+                    "",
+                    can_save
+                        && self.tool.get() == Tool::Crop
+                        && self.drag.get().is_some_and(|d| !d.active),
+                    |a| a.crop_selection(),
+                ),
+                item("arrow", "Draw Arrow", "", can_save, |a| {
+                    a.set_tool(Tool::Arrow)
+                }),
+                item("text", "Add Text…", "", can_save, |a| a.show_text()),
+                MenuEntry::Separator,
+                item("rotate", "Rotate Clockwise", "", can_save, |a| {
+                    a.apply_edit(EditOperation::RotateClockwise)
+                }),
+                item("resize", "Resize…", "", can_save, |a| a.show_resize()),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    MenuItemModel::new(
+                        "annotation-color",
+                        format!(
+                            "Annotation Color ({})",
+                            colors[self.annotation_color.get().min(4)]
+                        ),
+                    )
+                    .enabled(can_save)
+                    .children(color_items),
+                ),
+                MenuEntry::Item(
+                    MenuItemModel::new(
+                        "arrow-width",
+                        format!("Arrow Width ({} px)", self.stroke_width.get()),
+                    )
+                    .enabled(can_save)
+                    .children(width_items),
+                ),
             ]),
         ])
     }
@@ -932,7 +1010,19 @@ mod tests {
         let empty = VellumApp::new(None, 0, String::new());
         assert!(menu_enabled(&empty, "open"));
         assert!(menu_enabled(&empty, "close"));
-        for id in ["save", "save-as", "undo", "redo"] {
+        for id in [
+            "save",
+            "save-as",
+            "undo",
+            "redo",
+            "crop",
+            "arrow",
+            "text",
+            "rotate",
+            "resize",
+            "fit",
+            "actual-size",
+        ] {
             assert!(!menu_enabled(&empty, id));
         }
 
@@ -940,8 +1030,20 @@ mod tests {
         assert!(menu_enabled(&app, "save"));
         assert!(menu_enabled(&app, "save-as"));
         assert!(!menu_enabled(&app, "undo"));
-        modify(&app);
         let window_id = 0x76656c6c;
+        register_menu_callbacks(window_id, &app.editor_menu());
+        assert!(invoke_menu_callback(window_id, "rotate"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !app.runtime.get().lock().unwrap().dirty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "menu rotation timed out"
+            );
+            app.poll_editor();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(app.edited_bitmap.get().unwrap().width(), 1);
+        assert_eq!(app.edited_bitmap.get().unwrap().height(), 2);
         for (id, dirty, next) in [("undo", false, "redo"), ("redo", true, "undo")] {
             assert!(menu_enabled(&app, id));
             assert!(!menu_enabled(&app, next));
@@ -960,28 +1062,22 @@ mod tests {
         unregister_menu_callbacks(window_id);
 
         app.runtime.get().lock().unwrap().begin(Job::Save).unwrap();
-        for id in ["open", "close", "save", "save-as", "undo", "redo"] {
+        for id in [
+            "open",
+            "close",
+            "save",
+            "save-as",
+            "undo",
+            "redo",
+            "crop",
+            "arrow",
+            "text",
+            "rotate",
+            "resize",
+            "fit",
+            "actual-size",
+        ] {
             assert!(!menu_enabled(&app, id));
-        }
-    }
-
-    #[test]
-    fn editing_toolbar_uses_one_row_and_no_space_without_an_image() {
-        use scarlet_ui::element::{ElementTree, LayoutConstraints};
-        let measure = |app: &VellumApp| {
-            let mut tree = ElementTree::new();
-            tree.set_root(app.editor_toolbar().create_element());
-            tree.layout(LayoutConstraints::loose(850.0, 560.0))
-        };
-        let empty = VellumApp::new(None, 0, String::new());
-        assert_eq!(measure(&empty).height, 0.0);
-        let app = app();
-        for tool in [Tool::View, Tool::Crop, Tool::Arrow, Tool::Text] {
-            app.tool.set(tool);
-            let size = measure(&app);
-            println!("{tool:?} toolbar at minimum window width: {size:?}");
-            assert!(size.height > 0.0 && size.height <= 64.0);
-            assert!(size.width <= 850.0);
         }
     }
 

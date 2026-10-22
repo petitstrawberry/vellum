@@ -13,8 +13,8 @@ use vellum_core::{
 
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
-    Button, CanvasView, Color, HeaderBar, Icon, KeyCode, KeyEvent, MenuBarModel, PlatformWindow,
-    Rectangle, ScrollAxis, ScrollView, Size, State, Text, Window, hstack, vstack, zstack,
+    Button, CanvasView, Color, KeyCode, KeyEvent, MenuBarModel, PlatformWindow, Rectangle,
+    ScrollAxis, ScrollView, Size, State, Text, Window, hstack, vstack, zstack,
 };
 use scarlet_ui_macros::View;
 use vellum_core::Document;
@@ -45,7 +45,6 @@ struct VellumApp {
     fullscreen: State<bool>,
     fullscreen_applied: State<bool>,
     decorations_hidden: State<bool>,
-    chrome_visible: State<bool>,
     status: State<String>,
     edited_bitmap: State<Option<Arc<Bitmap>>>,
     runtime: State<Arc<Mutex<Runtime>>>,
@@ -211,17 +210,10 @@ impl VellumApp {
 
     fn set_fullscreen_mode(&self, fullscreen: bool) {
         self.fullscreen.set(fullscreen);
-        self.chrome_visible.set(!fullscreen);
     }
 
     fn toggle_fullscreen(&self) {
         self.set_fullscreen_mode(!self.fullscreen.get());
-    }
-
-    fn update_chrome_visibility(&self, y: i32) {
-        if self.fullscreen.get() {
-            self.chrome_visible.set(y < 48);
-        }
     }
 
     fn draw_canvas(
@@ -349,22 +341,21 @@ impl VellumApp {
         let (canvas_width, canvas_height, content_width, content_height) =
             canvas_layout_dimensions(page_width, page_height, zoom, fit_to_window);
 
-        let previous = self.clone();
-        let next = self.clone();
-        let zoom_out = self.clone();
-        let zoom_in = self.clone();
-        let fit = self.clone();
-        let actual_size = self.clone();
-        let fullscreen = self.clone();
         let key_app = self.clone();
         let navigation_app = self.clone();
         let page_count = self.page_count();
         let fullscreen_mode = self.fullscreen.get();
-        let chrome_visible = self.chrome_visible.get();
         let zoom_label = if fit_to_window {
-            String::from("Auto")
+            String::from("Fit")
         } else {
             format!("{}%", (zoom * 100.0).round() as u32)
+        };
+        let document_info = if let Some(bitmap) = self.edited_bitmap.get() {
+            format!("{} × {} px · {zoom_label}", bitmap.width(), bitmap.height())
+        } else if page_count > 0 {
+            format!("{} / {} · {zoom_label}", page + 1, page_count)
+        } else {
+            String::new()
         };
         let canvas_app = self.clone();
         let canvas_fallback = bitmap.clone();
@@ -389,108 +380,39 @@ impl VellumApp {
             scroll.content_size(content_width, content_height)
         };
 
-        let header = HeaderBar::new(
-            hstack! {
-                scarlet_ui::if_view!(page_count > 1,
-                    hstack! {
-                        Button::icon_only(Icon::ChevronLeft).header_style().enabled(page > 0)
-                            .on_click(move || previous.move_page(-1)),
-                        Text::new(format!("Page {} of {}", page + 1, page_count)).font_size(13.0),
-                        Button::icon_only(Icon::ChevronRight).header_style().enabled(page + 1 < page_count)
-                            .on_click(move || next.move_page(1)),
-                    }.spacing(8.0),
-                    Text::new(if page_count == 0 {
-                        String::from("No document")
-                    } else if let Some(bitmap) = self.edited_bitmap.get() {
-                        format!("Image · {} × {} px", bitmap.width(), bitmap.height())
-                    } else {
-                        String::from("PDF · 1 page")
-                    })
-                        .font_size(12.0).color(ColorPalette::default().text_secondary())
-                ),
-                Spacer::new(),
-                Button::new("Fit")
-                    .header_style()
-                    .font_size(13.0)
-                    .enabled(page_count > 0)
-                    .background_color(if fit_to_window { ColorPalette::default().surface_variant() } else { Color::TRANSPARENT })
-                    .on_click(move || fit.fit_to_window()),
-                Button::new("100%")
-                    .header_style()
-                    .font_size(13.0)
-                    .enabled(page_count > 0)
-                    .on_click(move || actual_size.set_zoom(1.0)),
-                Button::icon_only(Icon::ZoomOut)
-                    .header_style()
-                    .enabled(page_count > 0)
-                    .on_click(move || zoom_out.change_zoom(0.8)),
-                hstack! {
-                    Spacer::new(),
-                    Text::new(zoom_label).font_size(13.0),
-                    Spacer::new(),
-                }
-                .frame_width(56.0),
-                hstack! {
-                    Button::icon_only(Icon::ZoomIn)
-                        .header_style()
-                        .enabled(page_count > 0)
-                        .on_click(move || zoom_in.change_zoom(1.25)),
-                    Button::icon_only(if fullscreen_mode {
-                        Icon::ArrowsMinimize
-                    } else {
-                        Icon::ArrowsMaximize
-                    })
-                    .header_style()
-                    .on_click(move || fullscreen.toggle_fullscreen()),
-                }
-                .spacing(8.0),
-            }
-            .spacing(8.0)
-            .padding(10.0),
-        );
-        let hidden_chrome = Rectangle::new()
-            .fill(Color::TRANSPARENT)
-            .frame(f32::INFINITY, 48.0);
-        let chrome =
-            scarlet_ui::if_view!(!fullscreen_mode || chrome_visible, header, hidden_chrome);
         let hidden_status = Rectangle::new()
             .fill(Color::TRANSPARENT)
             .frame(f32::INFINITY, 0.0);
         let status = scarlet_ui::if_view!(
             !fullscreen_mode,
-            Text::from_state(self.status.clone())
-                .font_size(12.0)
-                .padding(8.0)
-                .frame(f32::INFINITY, 32.0),
+            hstack! {
+                Text::from_state(self.status.clone()).font_size(12.0),
+                Spacer::new(),
+                Text::new(document_info).font_size(11.0)
+                    .color(ColorPalette::default().text_secondary()),
+            }
+            .spacing(12.0)
+            .padding(6.0)
+            .frame(f32::INFINITY, 28.0),
             hidden_status
         );
-        let open_empty = self.clone();
         let document_view = scarlet_ui::if_view!(page_count > 0,
             scroll.frame(f32::INFINITY, f32::INFINITY),
             vstack! {
                 Spacer::new(),
                 Text::new("Open an image or PDF").font_size(24.0).color(ColorPalette::default().text_primary()),
                 Text::new("View documents, crop images, and add annotations.").font_size(12.0).color(ColorPalette::default().text_secondary()),
-                Button::new("Open File…").font_size(13.0).padding(10.0).on_click(move || open_empty.request_transition(Pending::Open)),
+                Text::new("File → Open…").font_size(13.0),
                 Text::from_state(self.status.clone()).font_size(12.0).color(ColorPalette::default().text_secondary()),
                 Spacer::new(),
             }.spacing(18.0).padding(28.0).frame(f32::INFINITY, f32::INFINITY)
                 .background(ColorPalette::default().surface_variant())
         );
-        let viewer = vstack! {
-            chrome,
-            document_view,
-        }
-        .frame(f32::INFINITY, f32::INFINITY);
-
-        let pointer_app = self.clone();
         vstack! {
-            self.editor_toolbar(),
-            viewer.background(Color::rgb(38, 40, 46)),
+            document_view.background(Color::rgb(38, 40, 46)),
             status,
         }
         .frame(f32::INFINITY, f32::INFINITY)
-        .on_mouse_move(move |_x, y| pointer_app.update_chrome_visibility(y))
         .on_event_capture(move |event| {
             if let scarlet_ui::Event::Keyboard(event) = event {
                 key_app.capture_key(event.clone())
@@ -687,7 +609,6 @@ impl Application for VellumApp {
             self.fullscreen_applied.set(desired);
         } else {
             self.fullscreen.set(applied);
-            self.chrome_visible.set(!applied);
             self.status.set(if desired {
                 String::from("Could not enter fullscreen")
             } else {
@@ -703,7 +624,6 @@ impl Application for VellumApp {
         self.fullscreen.set(fullscreen);
         self.fullscreen_applied.set(fullscreen);
         self.decorations_hidden.set(fullscreen);
-        self.chrome_visible.set(!fullscreen);
     }
 
     fn on_window_resize(&mut self, ctx: &WindowContext, _width: u32, _height: u32) {
