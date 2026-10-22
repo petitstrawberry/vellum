@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use vellum_core::Document;
 
 #[cfg(feature = "gui")]
+mod editor;
+#[cfg(feature = "gui")]
 mod ui;
 
 struct Arguments {

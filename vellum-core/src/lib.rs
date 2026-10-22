@@ -1,9 +1,13 @@
 //! Vellum's pure-Rust document loading and rasterization core.
 //!
-//! The core deliberately has no dependency on Scarlet or on a windowing
-//! system. It decodes common raster image formats with `image` and rasterizes
+//! Loading and editing have no window-system dependency. Native export uses
+//! Scarlet filesystem capabilities where its standard library lacks them. It decodes common raster image formats with `image` and rasterizes
 //! PDF pages with `hayro`, so the same document model can be used by the
 //! ScarletUI frontends and headless tests.
+
+pub mod editing;
+mod native_fs;
+mod save;
 
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
@@ -89,11 +93,12 @@ impl Bitmap {
 
     /// Save the bitmap as a PNG file.
     pub fn save_png(&self, path: impl AsRef<Path>) -> Result<(), DocumentError> {
-        let image = image::RgbaImage::from_raw(self.width, self.height, self.rgba.clone())
-            .ok_or_else(|| DocumentError::new("could not construct PNG image buffer"))?;
-        image
-            .save_with_format(path, image::ImageFormat::Png)
-            .map_err(|error| DocumentError::new(format!("could not save PNG: {error}")))
+        // Existing destinations are staged and synchronized before replacement.
+        // New paths are exclusively reserved before encoding to prevent a late
+        // publication from overwriting a file created by another writer.
+        // Directory-entry persistence after power loss is not guaranteed.
+
+        save::save_png(self, path.as_ref())
     }
 }
 
@@ -153,8 +158,37 @@ impl Document {
     /// Open an image or PDF document from a filesystem path.
     pub fn open(path: impl AsRef<Path>) -> Result<Arc<Self>, DocumentError> {
         let path = path.as_ref();
-        let bytes = std::fs::read(path)
+        // A growing file or a special file must not cause an unbounded read.
+        use std::io::Read;
+        const MAX_INPUT_BYTES: u64 = 128 * 1024 * 1024;
+        let metadata = std::fs::metadata(path)
             .map_err(|error| DocumentError::new(format!("could not read document: {error}")))?;
+        if !metadata.is_file() {
+            return Err(DocumentError::new("document is not a regular file"));
+        }
+        if metadata.len() > MAX_INPUT_BYTES {
+            return Err(DocumentError::new(
+                "documents larger than 128 MiB are not supported",
+            ));
+        }
+        let file = std::fs::File::open(path)
+            .map_err(|error| DocumentError::new(format!("could not read document: {error}")))?;
+        if !file
+            .metadata()
+            .map_err(|e| DocumentError::new(e.to_string()))?
+            .is_file()
+        {
+            return Err(DocumentError::new("document is not a regular file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_INPUT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| DocumentError::new(format!("could not read document: {error}")))?;
+        if bytes.len() as u64 > MAX_INPUT_BYTES {
+            return Err(DocumentError::new(
+                "documents larger than 128 MiB are not supported",
+            ));
+        }
         let title = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -183,7 +217,16 @@ impl Document {
             }));
         }
 
-        let decoded = image::load_from_memory(&bytes)
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .map_err(|error| DocumentError::new(format!("could not identify image: {error}")))?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(32_768);
+        limits.max_image_height = Some(32_768);
+        limits.max_alloc = Some(MAX_BITMAP_PIXELS * 4);
+        reader.limits(limits);
+        let decoded = reader
+            .decode()
             .map_err(|error| DocumentError::new(format!("could not decode image: {error}")))?;
         let rgba = decoded.into_rgba8();
         let bitmap = Arc::new(Bitmap::from_rgba(
@@ -198,6 +241,11 @@ impl Document {
             page_count: 1,
             source: DocumentSource::Image(bitmap),
         }))
+    }
+
+    /// Whether this document is a single raster image, rather than a PDF.
+    pub fn is_image(&self) -> bool {
+        matches!(&self.source, DocumentSource::Image(_))
     }
 
     /// Return the original document path.
@@ -513,6 +561,8 @@ impl Document {
                         bitmap: bitmap.clone(),
                     });
                 }
+                // Keep nearby pages, with a hard byte cap for long PDFs.
+                trim_pdf_cache(&mut cache, index, 128 * 1024 * 1024);
                 if let Ok(mut errors) = errors.lock()
                     && let Some(slot) = errors.get_mut(index)
                 {
@@ -653,6 +703,27 @@ fn normalized_render_scale_for_page(
     ))
 }
 
+fn trim_pdf_cache(cache: &mut [Option<CachedPage>], keep: usize, limit: usize) {
+    let mut bytes: usize = cache.iter().flatten().map(|p| p.bitmap.rgba().len()).sum();
+    if bytes <= limit {
+        return;
+    }
+    let mut candidates: Vec<_> = cache
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| (i != keep && p.is_some()).then_some(i))
+        .collect();
+    candidates.sort_unstable_by_key(|i| std::cmp::Reverse(i.abs_diff(keep)));
+    for i in candidates {
+        if bytes <= limit {
+            break;
+        }
+        if let Some(page) = cache[i].take() {
+            bytes = bytes.saturating_sub(page.bitmap.rgba().len());
+        }
+    }
+}
+
 fn normalize_render_scale_milli(width: f32, height: f32, render_scale_milli: u32) -> u32 {
     let max_scale = (PDF_MAX_DIMENSION / width.max(height).max(1.0)).max(0.01);
     let max_scale_milli = (max_scale * 1_000.0).round().max(1.0) as u32;
@@ -674,5 +745,33 @@ mod tests {
     #[test]
     fn rejects_invalid_pixel_buffer_length() {
         assert!(Bitmap::from_rgba(1, 1, vec![0, 1, 2]).is_err());
+    }
+    #[test]
+    fn pdf_cache_evicts_farthest_pages_with_a_byte_budget() {
+        let bitmap = std::sync::Arc::new(Bitmap::from_rgba(2, 1, vec![0; 8]).unwrap());
+        let mut pages = vec![
+            Some(super::CachedPage {
+                render_scale_milli: 1000,
+                bitmap
+            });
+            4
+        ];
+        super::trim_pdf_cache(&mut pages, 1, 16);
+        assert!(pages[1].is_some());
+        assert_eq!(pages.iter().flatten().count(), 2);
+        assert!(pages[3].is_none());
+    }
+    #[test]
+    fn nonregular_and_oversized_inputs_are_rejected_before_decoding() {
+        let dir = std::env::temp_dir().join(format!("vellum-input-limits-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(super::Document::open(&dir).is_err());
+        let path = dir.join("sparse.png");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(128 * 1024 * 1024 + 1).unwrap();
+        drop(file);
+        let error = super::Document::open(path).err().unwrap().to_string();
+        assert!(error.contains("128 MiB"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
