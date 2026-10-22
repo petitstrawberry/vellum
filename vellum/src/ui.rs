@@ -263,6 +263,21 @@ impl VellumApp {
         draw_bitmap_to_canvas(buffer, width, height, bitmap.as_deref());
     }
 
+    fn capture_key(&self, event: KeyEvent) -> bool {
+        if matches!(
+            event,
+            KeyEvent::Pressed {
+                keycode: KeyCode::F(11) | KeyCode::Escape,
+                ..
+            }
+        ) || matches!(event, KeyEvent::Pressed { modifiers, .. } if modifiers.primary())
+        {
+            self.handle_key(event)
+        } else {
+            false
+        }
+    }
+
     fn handle_key(&self, event: KeyEvent) -> bool {
         if self.edit_key(event.clone()) {
             return true;
@@ -342,6 +357,7 @@ impl VellumApp {
         let actual_size = self.clone();
         let fullscreen = self.clone();
         let key_app = self.clone();
+        let navigation_app = self.clone();
         let page_count = self.page_count();
         let fullscreen_mode = self.fullscreen.get();
         let chrome_visible = self.chrome_visible.get();
@@ -469,7 +485,14 @@ impl VellumApp {
         .on_mouse_move(move |_x, y| pointer_app.update_chrome_visibility(y))
         .on_event_capture(move |event| {
             if let scarlet_ui::Event::Keyboard(event) = event {
-                key_app.handle_key(event.clone())
+                key_app.capture_key(event.clone())
+            } else {
+                false
+            }
+        })
+        .on_event(move |event| {
+            if let scarlet_ui::Event::Keyboard(event) = event {
+                navigation_app.handle_key(event.clone())
             } else {
                 false
             }
@@ -578,6 +601,47 @@ fn draw_bitmap_to_canvas(
 #[cfg(test)]
 mod tests {
     use super::canvas_layout_dimensions;
+    use super::*;
+
+    #[test]
+    fn space_activates_focused_controls_before_viewer_navigation() {
+        use scarlet_ui::event::KeyModifiers;
+        use scarlet_ui::pipeline::RenderingPipeline;
+        let app = VellumApp::new(None, 0, String::new());
+        let capture = app.clone();
+        let navigation = app.clone();
+        let activations = State::new(scarlet_ui::StateId::new(0x76656c6c), 0usize);
+        let clicked = activations.clone();
+        let view = Button::new("Rotate")
+            .on_click(move || clicked.update(|count| *count += 1))
+            .on_event_capture(move |event| {
+                matches!(event, scarlet_ui::Event::Keyboard(key) if capture.capture_key(*key))
+            })
+            .on_event(move |event| {
+                matches!(event, scarlet_ui::Event::Keyboard(key) if navigation.handle_key(*key))
+            });
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new("test", view)
+                .decorated(false)
+                .size(Size::new(200.0, 80.0))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        pipeline.handle_event(&scarlet_ui::Event::Keyboard(KeyEvent::Pressed {
+            keycode: KeyCode::Tab,
+            modifiers: KeyModifiers::empty(),
+        }));
+        pipeline.handle_event(&scarlet_ui::Event::Keyboard(KeyEvent::Pressed {
+            keycode: KeyCode::Space,
+            modifiers: KeyModifiers::empty(),
+        }));
+        pipeline.handle_event(&scarlet_ui::Event::Keyboard(KeyEvent::Released {
+            keycode: KeyCode::Space,
+            modifiers: KeyModifiers::empty(),
+        }));
+        assert_eq!(activations.get(), 1);
+    }
 
     #[test]
     fn fit_canvas_keeps_a_finite_preferred_size() {
