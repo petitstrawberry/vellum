@@ -1,13 +1,20 @@
 //! ScarletUI frontend for Vellum.
 
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+#[path = "ui_edit.rs"]
+mod edit_ui;
+use crate::editor::{CanvasMapping, Completion, Drag, Job, Pending, Runtime, Tool};
+use vellum_core::{
+    Bitmap,
+    editing::{EditOperation, EditSession},
+};
 
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
     Button, CanvasView, Color, HeaderBar, Icon, KeyCode, KeyEvent, MenuBarModel, PlatformWindow,
-    Rectangle, ScrollAxis, ScrollView, Size, State, Text, Window, WindowGroup, hstack, vstack,
-    zstack,
+    Rectangle, ScrollAxis, ScrollView, Size, State, Text, Window, hstack, vstack, zstack,
 };
 use scarlet_ui_macros::View;
 use vellum_core::Document;
@@ -40,6 +47,18 @@ struct VellumApp {
     decorations_hidden: State<bool>,
     chrome_visible: State<bool>,
     status: State<String>,
+    edited_bitmap: State<Option<Arc<Bitmap>>>,
+    runtime: State<Arc<Mutex<Runtime>>>,
+    tool: State<Tool>,
+    drag: State<Option<Drag>>,
+    canvas_focus: State<bool>,
+    annotation_text: State<String>,
+    annotation_size: State<String>,
+    annotation_color: State<usize>,
+    stroke_width: State<String>,
+    resize_width: State<String>,
+    resize_height: State<String>,
+    aspect_lock: State<bool>,
 }
 
 impl VellumApp {
@@ -49,7 +68,17 @@ impl VellumApp {
             .map(|document| initial_page.min(document.page_count().saturating_sub(1)))
             .unwrap_or(0);
         let app = Self::default();
-        app.document.set(document);
+        app.document.set(document.clone());
+        if let Some(document) = document.filter(|d| d.is_image()) {
+            if let Ok(Some(bitmap)) = document.cached_page(0) {
+                app.edited_bitmap.set(Some(bitmap.clone()));
+                app.runtime.get().lock().unwrap().edit = Some(EditSession::new(bitmap));
+            }
+        }
+        app.canvas_focus.set(true);
+        app.annotation_size.set("28".into());
+        app.stroke_width.set("4".into());
+        app.aspect_lock.set(true);
         app.current_page.set(page);
         app.zoom.set(1.0);
         app.fit_to_window.set(true);
@@ -66,6 +95,9 @@ impl VellumApp {
     }
 
     fn current_bitmap(&self) -> Option<Arc<vellum_core::Bitmap>> {
+        if let Some(bitmap) = self.edited_bitmap.get() {
+            return Some(bitmap);
+        }
         let document = self.document.get()?;
         let page = self.current_page.get();
         match document.cached_page(page) {
@@ -83,25 +115,14 @@ impl VellumApp {
             return;
         };
 
-        let current_page = self.current_page.clone();
-        let render_revision = self.render_revision.clone();
-        let status = self.status.clone();
-        let title = document.title().to_string();
-        let page_count = document.page_count();
+        let shared = self.runtime.get();
+        let generation = shared.lock().unwrap().document;
         document.prefetch(page, move |result| {
-            if current_page.get() != page {
-                return;
-            }
-
-            match result {
-                Ok(()) => {
-                    render_revision.update(|revision| {
-                        *revision = revision.wrapping_add(1);
-                    });
-                    status.set(format!("{} — page {} of {}", title, page + 1, page_count));
-                }
-                Err(error) => status.set(format!("Could not render page: {error}")),
-            }
+            shared.lock().unwrap().results.push(Completion::Page {
+                document: generation,
+                page,
+                result,
+            });
         });
     }
 
@@ -109,26 +130,17 @@ impl VellumApp {
         let Some(document) = self.document.get() else {
             return;
         };
-
-        let current_page = self.current_page.clone();
-        let render_revision = self.render_revision.clone();
-        let status = self.status.clone();
-        let title = document.title().to_string();
-        let page_count = document.page_count();
+        if document.is_image() {
+            return;
+        }
+        let shared = self.runtime.get();
+        let generation = shared.lock().unwrap().document;
         document.prefetch_at_scale(page, render_scale_milli, move |result| {
-            if current_page.get() != page {
-                return;
-            }
-
-            match result {
-                Ok(()) => {
-                    render_revision.update(|revision| {
-                        *revision = revision.wrapping_add(1);
-                    });
-                    status.set(format!("{} — page {} of {}", title, page + 1, page_count));
-                }
-                Err(error) => status.set(format!("Could not render page: {error}")),
-            }
+            shared.lock().unwrap().results.push(Completion::Page {
+                document: generation,
+                page,
+                result,
+            });
         });
     }
 
@@ -168,8 +180,25 @@ impl VellumApp {
     }
 
     fn set_zoom(&self, zoom: f32) {
+        let dimensions = self
+            .edited_bitmap
+            .get()
+            .map(|b| (b.width() as f32, b.height() as f32))
+            .or_else(|| {
+                self.document
+                    .get()
+                    .and_then(|d| d.page_dimensions(self.current_page.get()).ok())
+            });
+        let limit = dimensions
+            .map(|(w, h)| (8_388_608.0 / (w * h).max(1.0)).sqrt().min(MAX_ZOOM))
+            .unwrap_or(MAX_ZOOM);
+        let zoom = if zoom.is_finite() {
+            zoom.max(MIN_ZOOM).min(limit)
+        } else {
+            1.0f32.min(limit)
+        };
         self.fit_to_window.set(false);
-        self.zoom.set(zoom.clamp(MIN_ZOOM, MAX_ZOOM));
+        self.zoom.set(zoom);
     }
 
     fn change_zoom(&self, factor: f32) {
@@ -203,6 +232,19 @@ impl VellumApp {
         page: usize,
         fallback: Option<Arc<vellum_core::Bitmap>>,
     ) {
+        if let Some(bitmap) = self.edited_bitmap.get() {
+            let scale = scarlet_ui::graphics::current_scale_milli().max(1) as f32 / 1000.0;
+            let mapping = CanvasMapping {
+                width: width as f32 / scale,
+                height: height as f32 / scale,
+                image_width: bitmap.width(),
+                image_height: bitmap.height(),
+            };
+            self.runtime.get().lock().unwrap().mapping = mapping;
+            draw_bitmap_to_canvas(buffer, width, height, Some(&bitmap));
+            self.draw_selection(buffer, width, height, mapping);
+            return;
+        }
         let Some(document) = self.document.get() else {
             fill_canvas(buffer, [38, 40, 46, 255]);
             return;
@@ -222,6 +264,9 @@ impl VellumApp {
     }
 
     fn handle_key(&self, event: KeyEvent) -> bool {
+        if self.edit_key(event.clone()) {
+            return true;
+        }
         match event {
             KeyEvent::Pressed { keycode, .. } => match keycode {
                 KeyCode::F(11) => {
@@ -276,10 +321,15 @@ impl VellumApp {
         let zoom = self.zoom.get();
         let fit_to_window = self.fit_to_window.get();
         let page = self.current_page.get();
-        let (page_width, page_height) = self
-            .document
-            .get()
-            .and_then(|document| document.page_dimensions(page).ok())
+        let (page_width, page_height) = bitmap
+            .as_ref()
+            .filter(|_| self.edited_bitmap.get().is_some())
+            .map(|b| (b.width() as f32, b.height() as f32))
+            .or_else(|| {
+                self.document
+                    .get()
+                    .and_then(|d| d.page_dimensions(page).ok())
+            })
             .unwrap_or((640.0, 480.0));
         let (canvas_width, canvas_height, content_width, content_height) =
             canvas_layout_dimensions(page_width, page_height, zoom, fit_to_window);
@@ -302,13 +352,16 @@ impl VellumApp {
         };
         let canvas_app = self.clone();
         let canvas_fallback = bitmap.clone();
+        let pointer = self.clone();
         let canvas = CanvasView::new(
             canvas_width,
             canvas_height,
             Rc::new(move |buffer, width, height| {
                 canvas_app.draw_canvas(buffer, width, height, page, canvas_fallback.clone());
             }),
-        );
+        )
+        .on_event(move |event| pointer.image_event(event))
+        .focusable(self.canvas_focus.clone());
         let canvas_content = zstack! {
             canvas.frame(content_width, content_height),
         }
@@ -380,22 +433,27 @@ impl VellumApp {
                 .frame(f32::INFINITY, 32.0),
             hidden_status
         );
-        let viewer = zstack! {
-            scroll
-                .frame(f32::INFINITY, f32::INFINITY),
+        let viewer = vstack! {
             chrome,
+            scroll.frame(f32::INFINITY, f32::INFINITY),
         }
-        .alignment(Alignment::Top)
         .frame(f32::INFINITY, f32::INFINITY);
 
         let pointer_app = self.clone();
         vstack! {
+            self.editor_toolbar(),
             viewer.background(Color::rgb(38, 40, 46)),
             status,
         }
         .frame(f32::INFINITY, f32::INFINITY)
         .on_mouse_move(move |_x, y| pointer_app.update_chrome_visibility(y))
-        .on_key(move |event| key_app.handle_key(event))
+        .on_event_capture(move |event| {
+            if let scarlet_ui::Event::Keyboard(event) = event {
+                key_app.handle_key(event.clone())
+            } else {
+                false
+            }
+        })
     }
 }
 
@@ -417,7 +475,13 @@ fn canvas_layout_dimensions(
     };
 
     if fit_to_window {
-        return (page_width, page_height, f32::INFINITY, f32::INFINITY);
+        let cap = (8_388_608.0 / (page_width * page_height)).sqrt().min(1.0);
+        return (
+            page_width * cap,
+            page_height * cap,
+            f32::INFINITY,
+            f32::INFINITY,
+        );
     }
 
     let zoom = if zoom.is_finite() && zoom > 0.0 {
@@ -427,6 +491,9 @@ fn canvas_layout_dimensions(
     };
     let width = (page_width * zoom).max(1.0);
     let height = (page_height * zoom).max(1.0);
+    let cap = (8_388_608.0 / (width * height)).sqrt().min(1.0);
+    let width = width * cap;
+    let height = height * cap;
     (width, height, width, height)
 }
 
@@ -512,7 +579,11 @@ mod tests {
 }
 
 impl Application for VellumApp {
-    fn on_window_sync(&mut self, _ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+    fn on_window_sync(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+        if ctx.scene_key.as_str() != "main" {
+            return;
+        }
+        self.sync_title(window);
         let desired = self.fullscreen.get();
         let applied = self.fullscreen_applied.get();
 
@@ -533,14 +604,20 @@ impl Application for VellumApp {
         }
     }
 
-    fn on_window_fullscreen_changed(&mut self, _ctx: &WindowContext, fullscreen: bool) {
+    fn on_window_fullscreen_changed(&mut self, ctx: &WindowContext, fullscreen: bool) {
+        if ctx.scene_key.as_str() != "main" {
+            return;
+        }
         self.fullscreen.set(fullscreen);
         self.fullscreen_applied.set(fullscreen);
         self.decorations_hidden.set(fullscreen);
         self.chrome_visible.set(!fullscreen);
     }
 
-    fn on_window_resize(&mut self, _ctx: &WindowContext, _width: u32, _height: u32) {
+    fn on_window_resize(&mut self, ctx: &WindowContext, _width: u32, _height: u32) {
+        if ctx.scene_key.as_str() != "main" {
+            return;
+        }
         let fullscreen = self.fullscreen.get();
 
         if self.fullscreen_applied.get() == fullscreen
@@ -550,21 +627,39 @@ impl Application for VellumApp {
         }
     }
 
+    fn on_window_created(&mut self, ctx: &WindowContext, _: &mut dyn PlatformWindow) {
+        if ctx.scene_key.as_str() == "main" {
+            self.runtime.get().lock().unwrap().owner = Some(ctx.window_id);
+        }
+    }
+    fn on_window_close_requested(&mut self, ctx: &WindowContext) -> bool {
+        if ctx.scene_key.as_str() == "main" {
+            self.request_transition(Pending::Close);
+            false
+        } else {
+            if ctx.scene_key.as_str() == "confirm" {
+                self.cancel_pending();
+            }
+            true
+        }
+    }
+    fn on_idle(&mut self) {
+        self.poll_editor();
+    }
     fn scenes(&self) -> impl Scene {
-        let title = self
-            .document
-            .get()
-            .map(|document| format!("Vellum — {}", document.title()))
-            .unwrap_or_else(|| String::from("Vellum — Image & PDF Viewer"));
-
-        WindowGroup::new(
-            "main",
-            Window::new(title, self.content())
-                .app_id(APP_ID)
-                .menu_bar(MenuBarModel::new(Vec::new()))
+        scarlet_ui::scenes! {
+            Window::new(self.window_title(), self.content()).scene_key("main")
+                .app_id(APP_ID).menu_bar(self.editor_menu())
                 .decorated(!self.decorations_hidden.get())
-                .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT)),
-        )
+                .min_size(Size::new(850.0,560.0))
+                .size(Size::new(WINDOW_WIDTH,WINDOW_HEIGHT)),
+            Window::new("Save Changes — Vellum",self.confirm_content()).scene_key("confirm")
+                .open_at_launch(false).app_id(APP_ID).size(Size::new(560.0,230.0)),
+            Window::new("Resize Image — Vellum",self.resize_content()).scene_key("resize")
+                .open_at_launch(false).app_id(APP_ID).size(Size::new(400.0,280.0)),
+            Window::new("Text Annotation — Vellum",self.text_content()).scene_key("text")
+                .open_at_launch(false).app_id(APP_ID).size(Size::new(520.0,280.0)),
+        }
     }
 
     fn debug_logging(&self) -> bool {
