@@ -346,7 +346,7 @@ impl VellumApp {
         let fullscreen_mode = self.fullscreen.get();
         let chrome_visible = self.chrome_visible.get();
         let zoom_label = if fit_to_window {
-            String::from("Fit")
+            String::from("Auto")
         } else {
             format!("{}%", (zoom * 100.0).round() as u32)
         };
@@ -375,24 +375,30 @@ impl VellumApp {
 
         let header = HeaderBar::new(
             hstack! {
-                Button::icon_only(Icon::ChevronLeft)
-                    .header_style()
-                    .on_click(move || previous.move_page(-1)),
-                Button::icon_only(Icon::ChevronRight)
-                    .header_style()
-                    .on_click(move || next.move_page(1)),
-                Spacer::new(),
-                Text::new(format!("Page {} / {}", page + 1, page_count))
-                    .font_size(13.0),
+                scarlet_ui::if_view!(page_count > 1,
+                    hstack! {
+                        Button::icon_only(Icon::ChevronLeft).header_style().enabled(page > 0)
+                            .on_click(move || previous.move_page(-1)),
+                        Text::new(format!("Page {} of {}", page + 1, page_count)).font_size(12.0),
+                        Button::icon_only(Icon::ChevronRight).header_style().enabled(page + 1 < page_count)
+                            .on_click(move || next.move_page(1)),
+                    }.spacing(8.0),
+                    Text::new(if page_count == 0 { "No document" } else if self.edited_bitmap.get().is_some() { "Image" } else { "PDF · 1 page" })
+                        .font_size(12.0).color(ColorPalette::default().text_secondary())
+                ),
                 Spacer::new(),
                 Button::new("Fit")
                     .header_style()
+                    .enabled(page_count > 0)
+                    .background_color(if fit_to_window { ColorPalette::default().surface_variant() } else { Color::TRANSPARENT })
                     .on_click(move || fit.fit_to_window()),
                 Button::new("100%")
                     .header_style()
+                    .enabled(page_count > 0)
                     .on_click(move || actual_size.set_zoom(1.0)),
                 Button::icon_only(Icon::ZoomOut)
                     .header_style()
+                    .enabled(page_count > 0)
                     .on_click(move || zoom_out.change_zoom(0.8)),
                 hstack! {
                     Spacer::new(),
@@ -403,6 +409,7 @@ impl VellumApp {
                 hstack! {
                     Button::icon_only(Icon::ZoomIn)
                         .header_style()
+                        .enabled(page_count > 0)
                         .on_click(move || zoom_in.change_zoom(1.25)),
                     Button::icon_only(if fullscreen_mode {
                         Icon::ArrowsMinimize
@@ -433,9 +440,22 @@ impl VellumApp {
                 .frame(f32::INFINITY, 32.0),
             hidden_status
         );
+        let open_empty = self.clone();
+        let document_view = scarlet_ui::if_view!(page_count > 0,
+            scroll.frame(f32::INFINITY, f32::INFINITY),
+            vstack! {
+                Spacer::new(),
+                Text::new("Open an image or PDF").font_size(24.0).color(ColorPalette::default().text_primary()),
+                Text::new("View documents, crop images, and add annotations.").font_size(13.0).color(ColorPalette::default().text_secondary()),
+                Button::new("Open File…").padding(10.0).on_click(move || open_empty.request_transition(Pending::Open)),
+                Text::from_state(self.status.clone()).font_size(12.0).color(ColorPalette::default().text_secondary()),
+                Spacer::new(),
+            }.spacing(18.0).padding(28.0).frame(f32::INFINITY, f32::INFINITY)
+                .background(ColorPalette::default().surface_variant())
+        );
         let viewer = vstack! {
             chrome,
-            scroll.frame(f32::INFINITY, f32::INFINITY),
+            document_view,
         }
         .frame(f32::INFINITY, f32::INFINITY);
 
@@ -656,9 +676,11 @@ impl Application for VellumApp {
             Window::new("Save Changes — Vellum",self.confirm_content()).scene_key("confirm")
                 .open_at_launch(false).app_id(APP_ID).size(Size::new(560.0,230.0)),
             Window::new("Resize Image — Vellum",self.resize_content()).scene_key("resize")
-                .open_at_launch(false).app_id(APP_ID).size(Size::new(400.0,280.0)),
+                .open_at_launch(false).app_id(APP_ID).size(Size::new(440.0,340.0))
+                .min_size(Size::new(440.0,340.0)),
             Window::new("Text Annotation — Vellum",self.text_content()).scene_key("text")
-                .open_at_launch(false).app_id(APP_ID).size(Size::new(520.0,280.0)),
+                .open_at_launch(false).app_id(APP_ID).size(Size::new(540.0,340.0))
+                .min_size(Size::new(540.0,340.0)),
         }
     }
 

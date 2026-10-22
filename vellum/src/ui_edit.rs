@@ -533,6 +533,9 @@ impl VellumApp {
                     self.cancel_pending();
                     self.status.set("File selection cancelled".into());
                 }
+                Err(scarlet_ui::file_dialog::FileDialogError::Unsupported(_)) => self.status.set(
+                    "File dialogs are unavailable on this platform. Your edits are kept.".into(),
+                ),
                 Err(error) => self.status.set(format!("File selection failed: {error}")),
             }
         } else {
@@ -690,7 +693,21 @@ impl VellumApp {
     }
     fn action_button(&self, label: &str, action: impl Fn(&Self) + 'static) -> Button {
         let app = self.clone();
-        Button::new(label).on_click(move || action(&app))
+        Button::new(label)
+            .header_style()
+            .on_click(move || action(&app))
+    }
+    fn tool_button(&self, label: &str, tool: Tool, action: impl Fn(&Self) + 'static) -> Button {
+        let palette = ColorPalette::default();
+        let button = self.action_button(label, action);
+        if self.tool.get() == tool {
+            button
+                .background_color(palette.primary_light())
+                .text_color(palette.text_primary())
+                .border_color(palette.primary())
+        } else {
+            button
+        }
     }
     pub(super) fn editor_toolbar(&self) -> impl View + Clone + use<> {
         let shared = self.runtime.get();
@@ -699,62 +716,122 @@ impl VellumApp {
         let undo = ready && rt.edit.as_ref().is_some_and(|e| e.can_undo());
         let redo = ready && rt.edit.as_ref().is_some_and(|e| e.can_redo());
         drop(rt);
-        let editing=scarlet_ui::if_view!(self.edited_bitmap.get().is_some(),
-            vstack!{
-                hstack!{
-                    self.action_button("Save As PNG",|a|a.save_image(true)),
-                    self.action_button("Undo",|a|a.undo_edit(false)).enabled(undo),
-                    self.action_button("Redo",|a|a.undo_edit(true)).enabled(redo),
-                    self.action_button("Rotate",|a|a.apply_edit(EditOperation::RotateClockwise)),
-                    self.action_button("Resize",|a|a.show_resize()),
-                    Spacer::new(),
-                }.spacing(6.0),
-                hstack!{
-                    self.action_button("View",|a|a.set_tool(Tool::View)),
-                    self.action_button("Crop",|a|a.set_tool(Tool::Crop)),
-                    self.action_button("Apply Crop",|a|a.crop_selection()),
-                    self.action_button("Arrow",|a|a.set_tool(Tool::Arrow)),
-                    self.action_button("Text",|a|a.show_text()),
-                    Select::new(vec!["Red".into(),"Blue".into(),"Yellow".into(),"White".into(),"Black".into()],self.annotation_color.clone()).width(78.0),
-                    self.action_button(&format!("Stroke: {} px",self.stroke_width.get()),|a|{
-                        let width=a.stroke_width.get().parse::<u32>().unwrap_or(4);
-                        a.stroke_width.set(if width>=16 {1} else {width*2}.to_string());
-                    }),
-                    Spacer::new(),
-                }.spacing(6.0),
-            }.spacing(5.0),
-            Text::new("Image editing · PDF viewing").font_size(12.0)
+        let palette = ColorPalette::default();
+        let bitmap = self.edited_bitmap.get();
+        let is_image = bitmap.is_some();
+        let tool = self.tool.get();
+        let crop = scarlet_ui::if_view!(
+            tool == Tool::Crop,
+            self.action_button("Apply Crop", |a| a.crop_selection())
+                .enabled(ready && self.drag.get().is_some())
+                .background_color(palette.primary_light()),
+            Text::new("")
         );
-        hstack! {self.action_button("Open…",|a|a.request_transition(Pending::Open)),editing}
-            .spacing(8.0)
-            .padding(8.0)
+        let annotation = scarlet_ui::if_view!(matches!(tool, Tool::Arrow | Tool::Text),
+            hstack! {
+                Text::new("Color").font_size(11.0).color(palette.text_secondary()),
+                Select::new(vec!["Red".into(),"Blue".into(),"Yellow".into(),"White".into(),"Black".into()],self.annotation_color.clone()).width(100.0),
+                scarlet_ui::if_view!(tool == Tool::Arrow,
+                    self.action_button(&format!("{} px", self.stroke_width.get()), |a| {
+                        let width = a.stroke_width.get().parse::<u32>().unwrap_or(4);
+                        a.stroke_width.set(if width >= 16 {1} else {width * 2}.to_string());
+                    }), Text::new("")),
+            }.spacing(8.0), Text::new("")
+        );
+        let tools = scarlet_ui::if_view!(is_image,
+            hstack! {
+                Text::new("TOOLS").font_size(10.0).color(palette.text_secondary()),
+                hstack! {
+                    self.tool_button("View", Tool::View, |a| a.set_tool(Tool::View)),
+                    self.tool_button("Crop", Tool::Crop, |a| a.set_tool(Tool::Crop)),
+                    self.tool_button("Arrow", Tool::Arrow, |a| a.set_tool(Tool::Arrow)),
+                    self.tool_button("Text", Tool::Text, |a| a.show_text()),
+                }.spacing(4.0),
+                Rectangle::new().fill(palette.border()).frame(1.0, 24.0),
+                self.action_button("Rotate", |a| a.apply_edit(EditOperation::RotateClockwise)).enabled(ready),
+                self.action_button("Resize…", |a| a.show_resize()).enabled(ready),
+                Spacer::new(),
+                crop,
+                annotation,
+            }.spacing(12.0).padding(10.0).frame_width(f32::INFINITY)
+                .background(palette.surface_variant()),
+            Rectangle::new().fill(Color::TRANSPARENT).frame(f32::INFINITY, 0.0)
+        );
+        vstack! {
+            hstack! {
+                self.action_button("Open…", |a| a.request_transition(Pending::Open)),
+                scarlet_ui::if_view!(is_image,
+                    hstack! {
+                        Rectangle::new().fill(palette.border()).frame(1.0, 24.0),
+                        self.action_button("Undo", |a| a.undo_edit(false)).enabled(undo),
+                        self.action_button("Redo", |a| a.undo_edit(true)).enabled(redo),
+                    }.spacing(12.0), Text::new("Images & PDF").font_size(12.0).color(palette.text_secondary())),
+                Spacer::new(),
+                Text::new(bitmap.as_ref().map(|b| format!("{} × {} px", b.width(), b.height())).unwrap_or_default())
+                    .font_size(12.0).color(palette.text_secondary()),
+                scarlet_ui::if_view!(is_image,
+                    self.action_button("Save As PNG…", |a| a.save_image(true)).enabled(ready)
+                        .background_color(palette.surface_variant()), Text::new("")),
+            }.spacing(16.0).padding(10.0).frame_width(f32::INFINITY),
+            tools,
+        }.alignment(Alignment::Leading).frame_width(f32::INFINITY)
+            .background(palette.surface())
     }
     pub(super) fn confirm_content(&self) -> impl View + Clone + use<> {
+        let palette = ColorPalette::default();
         vstack!{
-            Text::new("Save your image edits before continuing?").font_size(17.0),
-            Text::new("Save exports the edited image as a PNG.").font_size(12.0),
-            Text::from_state(self.status.clone()).font_size(12.0),
-            hstack!{self.action_button("Save",|a|a.save_image(false)),self.action_button("Discard",|a|a.discard_pending()),self.action_button("Cancel",|a|a.cancel_pending())}.spacing(10.0),
-        }.spacing(14.0).padding(20.0)
+            Text::new("Save changes?").font_size(20.0),
+            Text::new("Export your edited image as a PNG before continuing.").font_size(13.0).color(palette.text_secondary()),
+            Text::from_state(self.status.clone()).font_size(11.0).color(palette.text_secondary()),
+            Spacer::new(),
+            hstack!{
+                self.action_button("Cancel",|a|a.cancel_pending()),
+                Spacer::new(),
+                self.action_button("Discard",|a|a.discard_pending()),
+                self.action_button("Save PNG",|a|a.save_image(false)).background_color(palette.surface_variant()),
+            }.spacing(12.0),
+        }.alignment(Alignment::Leading).spacing(14.0).padding(24.0).frame(f32::INFINITY,f32::INFINITY)
     }
     pub(super) fn resize_content(&self) -> impl View + Clone + use<> {
+        let palette = ColorPalette::default();
         vstack!{
-            hstack!{Text::new("Width"),TextField::new(self.resize_width.clone()).autofocus(true).frame_width(160.0)},
-            hstack!{Text::new("Height"),TextField::new(self.resize_height.clone()).frame_width(160.0)},
+            Text::new("Resize image").font_size(20.0),
+            hstack!{
+                vstack!{
+                    Text::new("Width · px").font_size(12.0).color(palette.text_secondary()),
+                    TextField::new(self.resize_width.clone()).autofocus(true).frame_width(160.0),
+                }.alignment(Alignment::Leading).spacing(6.0),
+                vstack!{
+                    Text::new("Height · px").font_size(12.0).color(palette.text_secondary()),
+                    TextField::new(self.resize_height.clone()).frame_width(160.0),
+                }.alignment(Alignment::Leading).spacing(6.0),
+            }.spacing(16.0),
             hstack!{Toggle::new(self.aspect_lock.clone()),Text::new("Keep aspect ratio")}.spacing(8.0),
-            Text::new("When linked, width sets both dimensions.").font_size(11.0),
-            Text::from_state(self.status.clone()).font_size(11.0),
-            hstack!{self.action_button("Apply Resize",|a|a.resize_apply()),Button::new("Cancel").on_click(||dismiss_window("resize"))}.spacing(12.0),
-        }.spacing(12.0).padding(18.0)
+            Text::new("When linked, width sets both dimensions.").font_size(11.0).color(palette.text_secondary()),
+            Text::from_state(self.status.clone()).font_size(11.0).color(palette.text_secondary()),
+            Spacer::new(),
+            hstack!{
+                Spacer::new(),
+                Button::new("Cancel").header_style().on_click(||dismiss_window("resize")),
+                self.action_button("Apply Resize",|a|a.resize_apply()).background_color(palette.surface_variant()),
+            }.spacing(12.0),
+        }.alignment(Alignment::Leading).spacing(14.0).padding(24.0).frame(f32::INFINITY,f32::INFINITY)
     }
     pub(super) fn text_content(&self) -> impl View + Clone + use<> {
+        let palette = ColorPalette::default();
         vstack!{
-            TextField::new(self.annotation_text.clone()).autofocus(true).placeholder("Annotation text").frame_width(450.0),
-            hstack!{Text::new("Size (pixels)"),TextField::new(self.annotation_size.clone()).frame_width(80.0)}.spacing(12.0),
-            Text::new("Choose Place Text, then click its position on the image.").font_size(12.0),
-            Text::from_state(self.status.clone()).font_size(11.0),
-            hstack!{self.action_button("Place Text",|a|{a.set_tool(Tool::Text);dismiss_window("text");}),Button::new("Cancel").on_click(||dismiss_window("text"))}.spacing(12.0),
-        }.spacing(16.0).padding(20.0)
+            Text::new("Add text").font_size(20.0),
+            TextField::new(self.annotation_text.clone()).autofocus(true).placeholder("Annotation text").frame_width(f32::INFINITY),
+            hstack!{Text::new("Text size · px").font_size(12.0).color(palette.text_secondary()),TextField::new(self.annotation_size.clone()).frame_width(80.0)}.spacing(12.0),
+            Text::new("Choose Place Text, then click a position on the image.").font_size(12.0).color(palette.text_secondary()),
+            Text::from_state(self.status.clone()).font_size(11.0).color(palette.text_secondary()),
+            Spacer::new(),
+            hstack!{
+                Spacer::new(),
+                Button::new("Cancel").header_style().on_click(||dismiss_window("text")),
+                self.action_button("Place Text",|a|{a.set_tool(Tool::Text);dismiss_window("text");}).background_color(palette.surface_variant()),
+            }.spacing(12.0),
+        }.alignment(Alignment::Leading).spacing(14.0).padding(24.0).frame(f32::INFINITY,f32::INFINITY)
     }
     pub(super) fn editor_menu(&self) -> MenuBarModel {
         let item = |id: &str, title: &str, shortcut: &str, action: fn(&Self)| {
