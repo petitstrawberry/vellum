@@ -7,6 +7,32 @@ use scarlet_ui::{
 use std::path::PathBuf;
 use std::thread;
 
+// Give native codec and edit call chains an explicit budget instead of relying
+// on the platform's small default. Only the new apply/open/save workers use it.
+const EDITOR_WORKER_STACK_SIZE: usize = 2 * 1024 * 1024;
+
+fn editor_worker(name: &str) -> thread::Builder {
+    thread::Builder::new()
+        .name(name.into())
+        .stack_size(EDITOR_WORKER_STACK_SIZE)
+}
+
+fn finish_worker_start(
+    shared: &Arc<Mutex<Runtime>>,
+    started: std::io::Result<thread::JoinHandle<()>>,
+    failed: impl FnOnce(vellum_core::DocumentError) -> Completion,
+) {
+    if let Err(error) = started {
+        shared
+            .lock()
+            .unwrap()
+            .results
+            .push(failed(vellum_core::DocumentError::new(format!(
+                "Cannot start worker: {error}"
+            ))));
+    }
+}
+
 impl VellumApp {
     pub(super) fn window_title(&self) -> String {
         let shared = self.runtime.get();
@@ -64,13 +90,17 @@ impl VellumApp {
         };
         self.status.set("Applying edit…".into());
         self.drag.set(None);
-        thread::spawn(move || {
+        let completed = shared.clone();
+        let started = editor_worker("vellum-edit").spawn(move || {
             let result = operation.apply(&bitmap);
-            shared
+            completed
                 .lock()
                 .unwrap()
                 .results
                 .push(Completion::Edit(ticket, result));
+        });
+        finish_worker_start(&shared, started, |error| {
+            Completion::Edit(ticket, Err(error))
         });
     }
     fn undo_edit(&self, redo: bool) {
@@ -447,13 +477,17 @@ impl VellumApp {
             return;
         };
         self.status.set(format!("Opening {}…", path.display()));
-        thread::spawn(move || {
+        let completed = shared.clone();
+        let started = editor_worker("vellum-open").spawn(move || {
             let result = Document::open(path);
-            shared
+            completed
                 .lock()
                 .unwrap()
                 .results
                 .push(Completion::Open(ticket, result));
+        });
+        finish_worker_start(&shared, started, |error| {
+            Completion::Open(ticket, Err(error))
         });
     }
     fn save_to(&self, path: PathBuf) {
@@ -476,13 +510,18 @@ impl VellumApp {
         };
         drop(rt);
         self.status.set(format!("Saving {}…", path.display()));
-        thread::spawn(move || {
+        let completed = shared.clone();
+        let failed_path = path.clone();
+        let started = editor_worker("vellum-save").spawn(move || {
             let result = bitmap.save_png(&path);
-            shared
+            completed
                 .lock()
                 .unwrap()
                 .results
                 .push(Completion::Save(ticket, path, result));
+        });
+        finish_worker_start(&shared, started, |error| {
+            Completion::Save(ticket, failed_path, Err(error))
         });
     }
     fn install_document(&self, document: Arc<Document>) {
@@ -905,6 +944,88 @@ mod tests {
         ));
         std::fs::create_dir(&p).unwrap();
         p
+    }
+
+    fn spawn_failure() -> std::io::Result<thread::JoinHandle<()>> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "thread limit",
+        ))
+    }
+
+    #[test]
+    fn worker_start_failures_release_jobs_without_losing_edits_or_pending_actions() {
+        for job in [Job::Edit, Job::Open, Job::Save] {
+            let app = app();
+            modify(&app);
+            let bitmap = app.edited_bitmap.get().unwrap();
+            let shared = app.runtime.get();
+            let (ticket, version) = {
+                let mut rt = shared.lock().unwrap();
+                rt.pending = Some(Pending::Close);
+                rt.export_path = Some(PathBuf::from("existing.png"));
+                (rt.begin(job).unwrap(), rt.version())
+            };
+            finish_worker_start(&shared, spawn_failure(), |error| match job {
+                Job::Edit => Completion::Edit(ticket, Err(error)),
+                Job::Open => Completion::Open(ticket, Err(error)),
+                Job::Save => Completion::Save(ticket, PathBuf::from("new.png"), Err(error)),
+                _ => unreachable!(),
+            });
+            app.poll_editor();
+            let rt = shared.lock().unwrap();
+            assert!(rt.busy.is_none());
+            assert!(rt.dirty());
+            assert_eq!(rt.version(), version);
+            assert!(rt.edit.as_ref().unwrap().can_undo());
+            assert_eq!(rt.pending, Some(Pending::Close));
+            assert_eq!(
+                rt.export_path.as_deref(),
+                Some(std::path::Path::new("existing.png"))
+            );
+            assert!(Arc::ptr_eq(&bitmap, &app.edited_bitmap.get().unwrap()));
+            assert!(app.status.get().contains("Cannot start worker"));
+        }
+    }
+
+    #[test]
+    fn stale_worker_start_failure_does_not_clear_a_newer_job() {
+        let app = app();
+        let shared = app.runtime.get();
+        let old = shared.lock().unwrap().begin(Job::Edit).unwrap();
+        assert!(shared.lock().unwrap().finish(old));
+        let active = shared.lock().unwrap().begin(Job::Save).unwrap();
+        finish_worker_start(&shared, spawn_failure(), |error| {
+            Completion::Edit(old, Err(error))
+        });
+        app.poll_editor();
+        assert_eq!(shared.lock().unwrap().busy.unwrap().0, active);
+    }
+
+    #[test]
+    fn edit_save_and_open_workers_roundtrip_the_edited_image() {
+        let app = app();
+        app.apply_edit(EditOperation::RotateClockwise);
+        wait(&app);
+        let edited = app.edited_bitmap.get().unwrap();
+        assert_eq!((edited.width(), edited.height()), (1, 2));
+        assert!(app.runtime.get().lock().unwrap().dirty());
+        let directory = directory();
+        let path = directory.join("edited.png");
+        app.save_to(path.clone());
+        wait(&app);
+        assert!(!app.runtime.get().lock().unwrap().dirty());
+        app.apply_edit(EditOperation::RotateClockwise);
+        wait(&app);
+        assert!(app.runtime.get().lock().unwrap().dirty());
+        app.open_path(path.clone());
+        wait(&app);
+        assert_eq!(app.document.get().unwrap().path(), path);
+        assert_eq!(app.edited_bitmap.get().unwrap().rgba(), edited.rgba());
+        assert_eq!(app.edited_bitmap.get().unwrap().width(), 1);
+        assert!(!app.runtime.get().lock().unwrap().dirty());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
     #[test]
     fn close_cancel_and_failed_save_keep_edits() {

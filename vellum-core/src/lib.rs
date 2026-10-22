@@ -107,7 +107,8 @@ impl Bitmap {
 pub struct DocumentError(String);
 
 impl DocumentError {
-    fn new(message: impl Into<String>) -> Self {
+    /// Create an error for document work, including failures to start a worker.
+    pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 }
