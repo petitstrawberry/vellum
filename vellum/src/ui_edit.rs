@@ -734,6 +734,7 @@ impl VellumApp {
         let app = self.clone();
         Button::new(label)
             .header_style()
+            .font_size(13.0)
             .on_click(move || action(&app))
     }
     fn tool_button(&self, label: &str, tool: Tool, action: impl Fn(&Self) + 'static) -> Button {
@@ -749,15 +750,9 @@ impl VellumApp {
         }
     }
     pub(super) fn editor_toolbar(&self) -> impl View + Clone + use<> {
-        let shared = self.runtime.get();
-        let rt = shared.lock().unwrap();
-        let ready = rt.busy.is_none();
-        let undo = ready && rt.edit.as_ref().is_some_and(|e| e.can_undo());
-        let redo = ready && rt.edit.as_ref().is_some_and(|e| e.can_redo());
-        drop(rt);
+        let ready = self.runtime.get().lock().unwrap().busy.is_none();
         let palette = ColorPalette::default();
-        let bitmap = self.edited_bitmap.get();
-        let is_image = bitmap.is_some();
+        let is_image = self.edited_bitmap.get().is_some();
         let tool = self.tool.get();
         let crop = scarlet_ui::if_view!(
             tool == Tool::Crop,
@@ -768,7 +763,7 @@ impl VellumApp {
         );
         let annotation = scarlet_ui::if_view!(matches!(tool, Tool::Arrow | Tool::Text),
             hstack! {
-                Text::new("Color").font_size(11.0).color(palette.text_secondary()),
+                Text::new("Color").font_size(13.0).color(palette.text_secondary()),
                 Select::new(vec!["Red".into(),"Blue".into(),"Yellow".into(),"White".into(),"Black".into()],self.annotation_color.clone()).width(100.0),
                 scarlet_ui::if_view!(tool == Tool::Arrow,
                     self.action_button(&format!("{} px", self.stroke_width.get()), |a| {
@@ -777,9 +772,9 @@ impl VellumApp {
                     }), Text::new("")),
             }.spacing(8.0), Text::new("")
         );
-        let tools = scarlet_ui::if_view!(is_image,
+        scarlet_ui::if_view!(is_image,
             hstack! {
-                Text::new("TOOLS").font_size(10.0).color(palette.text_secondary()),
+                Text::new("TOOLS").font_size(13.0).color(palette.text_secondary()),
                 hstack! {
                     self.tool_button("View", Tool::View, |a| a.set_tool(Tool::View)),
                     self.tool_button("Crop", Tool::Crop, |a| a.set_tool(Tool::Crop)),
@@ -795,32 +790,13 @@ impl VellumApp {
             }.spacing(12.0).padding(10.0).frame_width(f32::INFINITY)
                 .background(palette.surface_variant()),
             Rectangle::new().fill(Color::TRANSPARENT).frame(f32::INFINITY, 0.0)
-        );
-        vstack! {
-            hstack! {
-                self.action_button("Open…", |a| a.request_transition(Pending::Open)),
-                scarlet_ui::if_view!(is_image,
-                    hstack! {
-                        Rectangle::new().fill(palette.border()).frame(1.0, 24.0),
-                        self.action_button("Undo", |a| a.undo_edit(false)).enabled(undo),
-                        self.action_button("Redo", |a| a.undo_edit(true)).enabled(redo),
-                    }.spacing(12.0), Text::new("Images & PDF").font_size(12.0).color(palette.text_secondary())),
-                Spacer::new(),
-                Text::new(bitmap.as_ref().map(|b| format!("{} × {} px", b.width(), b.height())).unwrap_or_default())
-                    .font_size(12.0).color(palette.text_secondary()),
-                scarlet_ui::if_view!(is_image,
-                    self.action_button("Save As PNG…", |a| a.save_image(true)).enabled(ready)
-                        .background_color(palette.surface_variant()), Text::new("")),
-            }.spacing(16.0).padding(10.0).frame_width(f32::INFINITY),
-            tools,
-        }.alignment(Alignment::Leading).frame_width(f32::INFINITY)
-            .background(palette.surface())
+        )
     }
     pub(super) fn confirm_content(&self) -> impl View + Clone + use<> {
         let palette = ColorPalette::default();
         vstack!{
             Text::new("Save changes?").font_size(20.0),
-            Text::new("Export your edited image as a PNG before continuing.").font_size(13.0).color(palette.text_secondary()),
+            Text::new("Export your edited image as a PNG before continuing.").font_size(12.0).color(palette.text_secondary()),
             Text::from_state(self.status.clone()).font_size(11.0).color(palette.text_secondary()),
             Spacer::new(),
             hstack!{
@@ -837,21 +813,21 @@ impl VellumApp {
             Text::new("Resize image").font_size(20.0),
             hstack!{
                 vstack!{
-                    Text::new("Width · px").font_size(12.0).color(palette.text_secondary()),
-                    TextField::new(self.resize_width.clone()).autofocus(true).frame_width(160.0),
+                    Text::new("Width · px").font_size(13.0).color(palette.text_secondary()),
+                    TextField::new(self.resize_width.clone()).font_size(13.0).autofocus(true).frame_width(160.0),
                 }.alignment(Alignment::Leading).spacing(6.0),
                 vstack!{
-                    Text::new("Height · px").font_size(12.0).color(palette.text_secondary()),
-                    TextField::new(self.resize_height.clone()).frame_width(160.0),
+                    Text::new("Height · px").font_size(13.0).color(palette.text_secondary()),
+                    TextField::new(self.resize_height.clone()).font_size(13.0).frame_width(160.0),
                 }.alignment(Alignment::Leading).spacing(6.0),
             }.spacing(16.0),
-            hstack!{Toggle::new(self.aspect_lock.clone()),Text::new("Keep aspect ratio")}.spacing(8.0),
+            hstack!{Toggle::new(self.aspect_lock.clone()),Text::new("Keep aspect ratio").font_size(13.0)}.spacing(8.0),
             Text::new("When linked, width sets both dimensions.").font_size(11.0).color(palette.text_secondary()),
             Text::from_state(self.status.clone()).font_size(11.0).color(palette.text_secondary()),
             Spacer::new(),
             hstack!{
                 Spacer::new(),
-                Button::new("Cancel").header_style().on_click(||dismiss_window("resize")),
+                Button::new("Cancel").header_style().font_size(13.0).on_click(||dismiss_window("resize")),
                 self.action_button("Apply Resize",|a|a.resize_apply()).background_color(palette.surface_variant()),
             }.spacing(12.0),
         }.alignment(Alignment::Leading).spacing(14.0).padding(24.0).frame(f32::INFINITY,f32::INFINITY)
@@ -860,43 +836,55 @@ impl VellumApp {
         let palette = ColorPalette::default();
         vstack!{
             Text::new("Add text").font_size(20.0),
-            TextField::new(self.annotation_text.clone()).autofocus(true).placeholder("Annotation text").frame_width(f32::INFINITY),
-            hstack!{Text::new("Text size · px").font_size(12.0).color(palette.text_secondary()),TextField::new(self.annotation_size.clone()).frame_width(80.0)}.spacing(12.0),
+            TextField::new(self.annotation_text.clone()).font_size(13.0).autofocus(true).placeholder("Annotation text").frame_width(f32::INFINITY),
+            hstack!{Text::new("Text size · px").font_size(13.0).color(palette.text_secondary()),TextField::new(self.annotation_size.clone()).font_size(13.0).frame_width(80.0)}.spacing(12.0),
             Text::new("Choose Place Text, then click a position on the image.").font_size(12.0).color(palette.text_secondary()),
             Text::from_state(self.status.clone()).font_size(11.0).color(palette.text_secondary()),
             Spacer::new(),
             hstack!{
                 Spacer::new(),
-                Button::new("Cancel").header_style().on_click(||dismiss_window("text")),
+                Button::new("Cancel").header_style().font_size(13.0).on_click(||dismiss_window("text")),
                 self.action_button("Place Text",|a|{a.set_tool(Tool::Text);dismiss_window("text");}).background_color(palette.surface_variant()),
             }.spacing(12.0),
         }.alignment(Alignment::Leading).spacing(14.0).padding(24.0).frame(f32::INFINITY,f32::INFINITY)
     }
     pub(super) fn editor_menu(&self) -> MenuBarModel {
-        let item = |id: &str, title: &str, shortcut: &str, action: fn(&Self)| {
+        let shared = self.runtime.get();
+        let rt = shared.lock().unwrap();
+        let ready = rt.busy.is_none();
+        let can_save = ready && rt.edit.is_some();
+        let can_undo = ready && rt.edit.as_ref().is_some_and(|edit| edit.can_undo());
+        let can_redo = ready && rt.edit.as_ref().is_some_and(|edit| edit.can_redo());
+        drop(rt);
+        let item = |id: &str, title: &str, shortcut: &str, enabled: bool, action: fn(&Self)| {
             let app = self.clone();
             MenuEntry::Item(
                 MenuItemModel::new(id, title)
                     .shortcut(shortcut)
+                    .enabled(enabled)
                     .on_activate(Arc::new(move || action(&app))),
             )
         };
         MenuBarModel::new(vec![
             MenuItemModel::new("file", "File").children(vec![
-                item("open", "Open…", "Ctrl+O", |a| {
+                item("open", "Open…", "Ctrl+O", ready, |a| {
                     a.request_transition(Pending::Open)
                 }),
-                item("save", "Save PNG", "Ctrl+S", |a| a.save_image(false)),
-                item("save-as", "Save As PNG…", "Ctrl+Shift+S", |a| {
+                item("save", "Save PNG", "Ctrl+S", can_save, |a| {
+                    a.save_image(false)
+                }),
+                item("save-as", "Save As PNG…", "Ctrl+Shift+S", can_save, |a| {
                     a.save_image(true)
                 }),
-                item("close", "Close", "Ctrl+W", |a| {
+                item("close", "Close", "Ctrl+W", ready, |a| {
                     a.request_transition(Pending::Close)
                 }),
             ]),
             MenuItemModel::new("edit", "Edit").children(vec![
-                item("undo", "Undo", "Ctrl+Z", |a| a.undo_edit(false)),
-                item("redo", "Redo", "Ctrl+Shift+Z", |a| a.undo_edit(true)),
+                item("undo", "Undo", "Ctrl+Z", can_undo, |a| a.undo_edit(false)),
+                item("redo", "Redo", "Ctrl+Shift+Z", can_redo, |a| {
+                    a.undo_edit(true)
+                }),
             ]),
         ])
     }
@@ -924,6 +912,79 @@ mod tests {
         drop(rt);
         app.publish_edit();
     }
+    fn menu_enabled(app: &VellumApp, id: &str) -> bool {
+        app.editor_menu()
+            .items()
+            .iter()
+            .flat_map(|menu| menu.children_value())
+            .find_map(|entry| match entry {
+                MenuEntry::Item(item) if item.id() == id => Some(item.enabled_value()),
+                _ => None,
+            })
+            .expect("editor command remains available in the window menu")
+    }
+
+    #[test]
+    fn menu_commands_follow_edit_history_and_busy_state() {
+        use scarlet_ui::menu_model::{
+            invoke_menu_callback, register_menu_callbacks, unregister_menu_callbacks,
+        };
+        let empty = VellumApp::new(None, 0, String::new());
+        assert!(menu_enabled(&empty, "open"));
+        assert!(menu_enabled(&empty, "close"));
+        for id in ["save", "save-as", "undo", "redo"] {
+            assert!(!menu_enabled(&empty, id));
+        }
+
+        let app = app();
+        assert!(menu_enabled(&app, "save"));
+        assert!(menu_enabled(&app, "save-as"));
+        assert!(!menu_enabled(&app, "undo"));
+        modify(&app);
+        let window_id = 0x76656c6c;
+        for (id, dirty, next) in [("undo", false, "redo"), ("redo", true, "undo")] {
+            assert!(menu_enabled(&app, id));
+            assert!(!menu_enabled(&app, next));
+            register_menu_callbacks(window_id, &app.editor_menu());
+            assert!(invoke_menu_callback(window_id, id));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while app.runtime.get().lock().unwrap().dirty() != dirty {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "menu command timed out"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(menu_enabled(&app, next));
+        }
+        unregister_menu_callbacks(window_id);
+
+        app.runtime.get().lock().unwrap().begin(Job::Save).unwrap();
+        for id in ["open", "close", "save", "save-as", "undo", "redo"] {
+            assert!(!menu_enabled(&app, id));
+        }
+    }
+
+    #[test]
+    fn editing_toolbar_uses_one_row_and_no_space_without_an_image() {
+        use scarlet_ui::element::{ElementTree, LayoutConstraints};
+        let measure = |app: &VellumApp| {
+            let mut tree = ElementTree::new();
+            tree.set_root(app.editor_toolbar().create_element());
+            tree.layout(LayoutConstraints::loose(850.0, 560.0))
+        };
+        let empty = VellumApp::new(None, 0, String::new());
+        assert_eq!(measure(&empty).height, 0.0);
+        let app = app();
+        for tool in [Tool::View, Tool::Crop, Tool::Arrow, Tool::Text] {
+            app.tool.set(tool);
+            let size = measure(&app);
+            println!("{tool:?} toolbar at minimum window width: {size:?}");
+            assert!(size.height > 0.0 && size.height <= 64.0);
+            assert!(size.width <= 850.0);
+        }
+    }
+
     fn wait(app: &VellumApp) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {

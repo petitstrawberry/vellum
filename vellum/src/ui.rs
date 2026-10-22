@@ -395,21 +395,29 @@ impl VellumApp {
                     hstack! {
                         Button::icon_only(Icon::ChevronLeft).header_style().enabled(page > 0)
                             .on_click(move || previous.move_page(-1)),
-                        Text::new(format!("Page {} of {}", page + 1, page_count)).font_size(12.0),
+                        Text::new(format!("Page {} of {}", page + 1, page_count)).font_size(13.0),
                         Button::icon_only(Icon::ChevronRight).header_style().enabled(page + 1 < page_count)
                             .on_click(move || next.move_page(1)),
                     }.spacing(8.0),
-                    Text::new(if page_count == 0 { "No document" } else if self.edited_bitmap.get().is_some() { "Image" } else { "PDF · 1 page" })
+                    Text::new(if page_count == 0 {
+                        String::from("No document")
+                    } else if let Some(bitmap) = self.edited_bitmap.get() {
+                        format!("Image · {} × {} px", bitmap.width(), bitmap.height())
+                    } else {
+                        String::from("PDF · 1 page")
+                    })
                         .font_size(12.0).color(ColorPalette::default().text_secondary())
                 ),
                 Spacer::new(),
                 Button::new("Fit")
                     .header_style()
+                    .font_size(13.0)
                     .enabled(page_count > 0)
                     .background_color(if fit_to_window { ColorPalette::default().surface_variant() } else { Color::TRANSPARENT })
                     .on_click(move || fit.fit_to_window()),
                 Button::new("100%")
                     .header_style()
+                    .font_size(13.0)
                     .enabled(page_count > 0)
                     .on_click(move || actual_size.set_zoom(1.0)),
                 Button::icon_only(Icon::ZoomOut)
@@ -462,8 +470,8 @@ impl VellumApp {
             vstack! {
                 Spacer::new(),
                 Text::new("Open an image or PDF").font_size(24.0).color(ColorPalette::default().text_primary()),
-                Text::new("View documents, crop images, and add annotations.").font_size(13.0).color(ColorPalette::default().text_secondary()),
-                Button::new("Open File…").padding(10.0).on_click(move || open_empty.request_transition(Pending::Open)),
+                Text::new("View documents, crop images, and add annotations.").font_size(12.0).color(ColorPalette::default().text_secondary()),
+                Button::new("Open File…").font_size(13.0).padding(10.0).on_click(move || open_empty.request_transition(Pending::Open)),
                 Text::from_state(self.status.clone()).font_size(12.0).color(ColorPalette::default().text_secondary()),
                 Spacer::new(),
             }.spacing(18.0).padding(28.0).frame(f32::INFINITY, f32::INFINITY)
