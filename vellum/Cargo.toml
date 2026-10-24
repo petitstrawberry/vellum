@@ -12,14 +12,14 @@ gui = ["dep:scarlet-ui", "dep:scarlet-ui-macros"]
 [dependencies]
 vellum-core = { path = "../vellum-core" }
 
-scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "eede18df956fa4599027f783266c5879d1afe564", package = "scarlet-ui-macros", optional = true }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "9c9067594f59e08b038b5dcc06b7f13c065cdba5", package = "scarlet-ui-macros", optional = true }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 scarlet-os = { git = "https://github.com/petitstrawberry/Scarlet", rev = "74b92fe8c43ba71467dd70083411c4574de01079", package = "scarlet-os" }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "eede18df956fa4599027f783266c5879d1afe564", package = "scarlet-ui", default-features = false, features = ["std", "platform-sws"], optional = true }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "9c9067594f59e08b038b5dcc06b7f13c065cdba5", package = "scarlet-ui", default-features = false, features = ["std", "platform-sws"], optional = true }
 
 [target.'cfg(not(target_os = "scarlet"))'.dependencies]
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "eede18df956fa4599027f783266c5879d1afe564", package = "scarlet-ui", default-features = false, features = ["std", "platform-winit"], optional = true }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "9c9067594f59e08b038b5dcc06b7f13c065cdba5", package = "scarlet-ui", default-features = false, features = ["std", "platform-winit"], optional = true }
 
 [[bin]]
 name = "vellum"
